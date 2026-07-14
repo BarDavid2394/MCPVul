@@ -8,6 +8,7 @@ from typing import List, Dict, Any
 from pathlib import Path
 
 from ..analyzers.base import Finding
+from ..catalog import CATALOG_VERSION
 
 
 class JsonReporter:
@@ -62,7 +63,8 @@ class JsonReporter:
         """Build the report data structure."""
         report = {
             "scanner": "MCP Security Scanner",
-            "version": "1.0.0",
+            "version": "2.0.0",
+            "catalog_version": CATALOG_VERSION,
             "timestamp": datetime.now().isoformat(),
             "scan_info": scan_info or {},
             "summary": self._calculate_summary(findings),
@@ -76,6 +78,9 @@ class JsonReporter:
             "total": len(findings),
             "by_severity": {},
             "by_type": {},
+            "by_attack": {},
+            "by_confidence": {},
+            "fixable": 0,
             "risk_score": 0,
         }
 
@@ -87,6 +92,12 @@ class JsonReporter:
             # Count by vulnerability type
             vuln_type = finding.vulnerability_type
             summary["by_type"][vuln_type] = summary["by_type"].get(vuln_type, 0) + 1
+
+            if finding.attack_id:
+                summary["by_attack"][finding.attack_id] = summary["by_attack"].get(finding.attack_id, 0) + 1
+            summary["by_confidence"][finding.confidence] = summary["by_confidence"].get(finding.confidence, 0) + 1
+            if finding.fixable:
+                summary["fixable"] += 1
 
             # Calculate risk score
             summary["risk_score"] += finding.severity.score
@@ -124,7 +135,7 @@ def findings_to_sarif(findings: List[Finding], tool_name: str = "mcp-scanner") -
             "tool": {
                 "driver": {
                     "name": tool_name,
-                    "version": "1.0.0",
+                    "version": "2.0.0",
                     "informationUri": "https://github.com/mcp-security/mcp-scanner",
                     "rules": _get_sarif_rules(findings),
                 }

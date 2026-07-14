@@ -1,14 +1,39 @@
 # MCP Security Scanner
 
-A security scanner for **MCP (Model Context Protocol)** server implementations that detects critical vulnerabilities that could compromise AI systems.
+A static security scanner for **MCP (Model Context Protocol)** projects. It scans Python source, MCP configuration, and dependency manifests against a versioned catalog based on the OWASP MCP Top 10 and official MCP security guidance.
 
 ## What is MCP?
 
 The Model Context Protocol (MCP) is Anthropic's open standard for connecting AI assistants to external tools and data sources. While powerful, MCP servers can introduce security vulnerabilities if not implemented carefully.
 
-## Vulnerabilities Detected
+## Attack Catalog
 
-This scanner detects **two critical vulnerability types**:
+Catalog version `2026.1` covers:
+
+| ID | Category |
+|---|---|
+| MCP01 | Token mismanagement and secret exposure |
+| MCP02 | Privilege escalation via scope creep |
+| MCP03 | Tool poisoning |
+| MCP04 | Software supply-chain attacks and dependency tampering |
+| MCP05 | Command injection and execution |
+| MCP06 | Prompt injection via contextual payloads |
+| MCP07 | Insufficient authentication and authorization |
+| MCP08 | Lack of audit and telemetry |
+| MCP09 | Shadow or confusable MCP servers/tools |
+| MCP10 | Context injection and over-sharing |
+| MCP11 | Confused deputy OAuth proxies |
+| MCP12 | Token passthrough |
+| MCP13 | Server-side request forgery |
+| MCP14 | Session hijacking and event injection |
+| MCP15 | Unsafe OAuth authorization URLs |
+| MCP16 | Local server and stdio proxy compromise |
+
+Run `python -m mcp_scanner rules` for stable rule IDs. Detection is heuristic static analysis: it identifies evidence and risky precursors, but cannot prove the absence of unknown or runtime-only attacks.
+
+## Original Detectors and Automatic Defense
+
+The original two categories receive deeper analysis and are the **only** categories eligible for automatic source fixes:
 
 ### 1. Tool Poisoning (Section 5.1.4)
 
@@ -77,7 +102,27 @@ python -m mcp_scanner scan path/to/server.py
 
 # Scan a directory
 python -m mcp_scanner scan ./mcp_servers/
+
+# List the catalog and stable rule IDs
+python -m mcp_scanner rules
+
+# Filter by legacy name, category, or rule
+python -m mcp_scanner scan server.py --check tool-poisoning
+python -m mcp_scanner scan server.py --check MCP13
+python -m mcp_scanner scan server.py --check MCP13-SSRF
 ```
+
+### Targeted Fixes
+
+```bash
+# Preview high-confidence MCP03/MCP06 changes
+python -m mcp_scanner fix server.py --dry-run --verbose
+
+# Apply with a .bak backup and verify only the two authorized categories
+python -m mcp_scanner fix server.py --verify
+```
+
+Ambiguous findings are left for manual review. Findings in MCP01, MCP02, MCP04, MCP05, and MCP07–MCP16 are reported but never modified. Verification reports those remaining categories separately.
 
 ### Output Options
 
@@ -105,8 +150,8 @@ python -m mcp_scanner scan server.py --check
 
 ```
 ================================================================
-          MCP Security Scanner v1.0
-    Detecting Tool Poisoning & Prompt Injection
+          MCP Security Scanner v2.0
+    OWASP MCP Top 10 + MCP Security Best Practices
 ================================================================
 
 Scan Information:
@@ -145,12 +190,16 @@ MCPVul/
 │   ├── __main__.py          # Entry point
 │   ├── main.py              # CLI interface
 │   ├── scanner.py           # Main orchestrator
+│   ├── catalog.py           # Versioned MCP01-MCP16 catalog
+│   ├── fixer.py             # MCP03/MCP06 targeted remediation
 │   ├── parsers/
 │   │   └── python_parser.py # AST-based MCP parser
 │   ├── analyzers/
 │   │   ├── base.py          # Base classes
 │   │   ├── tool_poisoning.py
-│   │   └── prompt_injection.py
+│   │   ├── prompt_injection.py
+│   │   └── project_risks.py # Project/config/dependency checks
+│   ├── defenses/            # Runtime helpers and safe transforms
 │   ├── patterns/
 │   │   └── signatures.py    # Detection patterns
 │   └── reporters/
@@ -194,10 +243,12 @@ MCPVul/
 4. **No imperative instructions** - Describe what the tool does, not what actions to take
 
 ### Against Indirect Prompt Injection:
-1. **Sanitize all external data** - Never return raw HTTP responses, file contents, or DB results
+1. **Treat external data as untrusted** - Never treat HTTP, file, or database content as instructions
 2. **Validate and filter** - Strip HTML, limit length, remove suspicious patterns
 3. **Use structured output** - Return specific fields, not raw content
-4. **Implement allowlists** - Only return expected content types
+4. **Implement allowlists** - Return only expected fields and content types
+
+The bundled content sanitizer provides normalization, active-content removal, known-pattern filtering, size limits, and explicit untrusted-data boundaries. It is defense in depth, not a proof that arbitrary prompt injection is impossible.
 
 ## References
 

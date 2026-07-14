@@ -1,11 +1,9 @@
 """
 MCP Security Scanner
-A tool for detecting security vulnerabilities in MCP server implementations.
-
-Focuses on two critical vulnerabilities:
-1. Tool Poisoning - Malicious instructions hidden in tool metadata
-2. Indirect Prompt Injection - Unsafe handling of external data
+A static project scanner for the OWASP MCP Top 10 and official MCP attack guidance.
+Automatic remediation is deliberately limited to tool poisoning and indirect
+prompt injection.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "MCP Security Project"

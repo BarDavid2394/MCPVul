@@ -188,7 +188,7 @@ class PythonMCPParser:
             decorator_name = self._get_decorator_name(decorator)
 
             # Check if it's a tool decorator
-            if any(pattern in decorator_name for pattern in self.TOOL_DECORATORS):
+            if decorator_name == "tool" or decorator_name.endswith(".tool"):
                 info = {"decorator_name": decorator_name, "description": ""}
 
                 # Extract description from decorator arguments

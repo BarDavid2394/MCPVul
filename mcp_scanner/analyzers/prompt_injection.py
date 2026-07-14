@@ -130,9 +130,10 @@ class PromptInjectionAnalyzer(BaseAnalyzer):
         pattern_findings = self._check_patterns(tool)
         findings.extend(pattern_findings)
 
-        # Perform data flow analysis
-        dataflow_findings = self._analyze_data_flow(tool)
-        findings.extend(dataflow_findings)
+        # Use the fallback data-flow heuristic only when a more precise sink
+        # signature did not already explain the same tool.
+        if not pattern_findings:
+            findings.extend(self._analyze_data_flow(tool))
 
         return findings
 
@@ -146,20 +147,16 @@ class PromptInjectionAnalyzer(BaseAnalyzer):
             matches = pattern_info["compiled"].finditer(tool.function_body)
 
             for match in matches:
-                # Check if sanitization is present nearby
-                context_start = max(0, match.start() - 200)
-                context_end = min(len(tool.function_body), match.end() + 200)
-                context = tool.function_body[context_start:context_end]
-
-                has_sanitization = self._check_sanitization(context)
-
-                # Reduce severity if sanitization detected
-                severity_str = pattern_info["severity"]
+                # A sanitizer elsewhere in the function is not proof that it is
+                # applied to this value. Only recognize a sanitizer at the sink.
+                match_line = tool.function_body[tool.function_body.rfind('\n', 0, match.start())+1:
+                                                 tool.function_body.find('\n', match.end())]
+                has_sanitization = self._check_sanitization(match_line)
                 if has_sanitization:
-                    severity_str = self._reduce_severity(severity_str)
-                    description_suffix = " (sanitization detected, risk reduced)"
-                else:
-                    description_suffix = ""
+                    continue  # Already sanitized, skip this finding
+
+                severity_str = pattern_info["severity"]
+                description_suffix = ""
 
                 severity = self._get_severity(severity_str)
                 line_offset = tool.function_body[:match.start()].count("\n")
@@ -223,7 +220,7 @@ class PromptInjectionAnalyzer(BaseAnalyzer):
                            ['.text', '.content', '.json', '.read', 'fetch', 'response', 'result']):
 
                         # Check for sanitization
-                        has_sanitization = self._check_sanitization(tool.function_body)
+                        has_sanitization = self._check_sanitization(return_code)
 
                         if not has_sanitization:
                             finding = self.create_finding(

@@ -1,4 +1,7 @@
-# MCP Security Scanner - Project Plan
+# MCP Security Scanner - Original v1 Project Plan
+
+> This document records the original two-detector design. The implemented v2
+> catalog and CLI are documented in `README.md` and `mcp_scanner/catalog.py`.
 
 ## Overview
 Build a security scanner that analyzes MCP (Model Context Protocol) server implementations to detect two critical vulnerabilities:

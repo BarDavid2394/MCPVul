@@ -14,6 +14,18 @@ import re
 # that could trick LLMs into performing unauthorized actions.
 
 TOOL_POISONING_PATTERNS = {
+    "invisible_unicode": {
+        "pattern": r"[\u200b\u200c\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069]",
+        "description": "Invisible or bidirectional Unicode control in tool metadata",
+        "severity": "CRITICAL",
+        "example": "zero-width or right-to-left override character",
+    },
+    "html_hidden_instruction": {
+        "pattern": r"(?i)<!--[^>]*(?:ignore|instruction|system|send|execute|secret)[^>]*-->",
+        "description": "Instruction hidden in an HTML comment",
+        "severity": "CRITICAL",
+        "example": "<!-- ignore previous instructions -->",
+    },
     # Hidden instruction markers - HIGH severity
     "hidden_instruction_brackets": {
         "pattern": r"(?i)\[(important|note|instruction|system|hidden|internal)\]",
@@ -183,7 +195,7 @@ PROMPT_INJECTION_PATTERNS = {
 # These patterns indicate proper sanitization - their presence reduces risk.
 
 SANITIZATION_PATTERNS = [
-    r"(?i)(sanitize|escape|filter|validate|clean|strip|purify)\s*\(",
+    r"(?i)(sanitize|escape|filter|validate|clean|strip|purify)[\w_]*\s*\(",
     r"(?i)html\.escape\s*\(",
     r"(?i)re\.sub\s*\(",
     r"(?i)\.replace\s*\([^)]*[<>\"'&][^)]*\)",
@@ -191,6 +203,7 @@ SANITIZATION_PATTERNS = [
     r"(?i)json\.loads\s*\([^)]*,\s*strict\s*=",
     r"(?i)\.strip\s*\(\)",
     r"(?i)(whitelist|allowlist|blocklist|blacklist)",
+    r"(?i)sanitize_content\s*\(",  # Our specific sanitization function
 ]
 
 
@@ -229,7 +242,7 @@ def compile_patterns(pattern_dict: dict) -> dict:
     for name, info in pattern_dict.items():
         compiled[name] = {
             **info,
-            "compiled": re.compile(info["pattern"], re.MULTILINE | re.DOTALL),
+            "compiled": re.compile(info["pattern"], re.MULTILINE),
         }
     return compiled
 

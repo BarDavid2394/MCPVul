@@ -89,8 +89,8 @@ class ConsoleReporter:
         """Print scanner header."""
         header = """
 ================================================================
-          MCP Security Scanner v1.0
-    Detecting Tool Poisoning & Prompt Injection
+          MCP Security Scanner v2.0
+    OWASP MCP Top 10 + MCP Security Best Practices
 ================================================================
 """
         print(self._color(header, "BOLD"))
@@ -150,6 +150,8 @@ class ConsoleReporter:
 
         total = sum(summary.values())
         print(f"  Total findings: {total}")
+        fixable = sum(1 for finding in findings if finding.fixable)
+        print(f"  Potentially fixable (MCP03/MCP06): {fixable}")
 
         for severity in [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW]:
             count = summary.get(severity.value, 0)

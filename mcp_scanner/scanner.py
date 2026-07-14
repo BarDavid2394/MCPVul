@@ -4,6 +4,8 @@ Main Scanner Orchestrator
 Coordinates parsing, analysis, and reporting for MCP security scanning.
 """
 
+import json
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -12,9 +14,11 @@ from .parsers.python_parser import PythonMCPParser, MCPServerInfo
 from .analyzers.base import Finding, Severity
 from .analyzers.tool_poisoning import ToolPoisoningAnalyzer
 from .analyzers.prompt_injection import PromptInjectionAnalyzer
+from .analyzers.project_risks import ProjectRiskAnalyzer
+from .catalog import ATTACK_CATEGORIES, RULES, normalize_check
 from .reporters.console import ConsoleReporter
 from .reporters.json_reporter import JsonReporter
-from .utils.helpers import get_python_files
+from .utils.helpers import get_project_files
 
 
 @dataclass
@@ -69,6 +73,7 @@ class MCPScanner:
         enable_tool_poisoning: bool = True,
         enable_prompt_injection: bool = True,
         verbose: bool = False,
+        check: str = None,
     ):
         """
         Initialize the scanner.
@@ -81,6 +86,8 @@ class MCPScanner:
         self.parser = PythonMCPParser()
         self.analyzers = []
         self.verbose = verbose
+        self.check = normalize_check(check)
+        self.project_analyzer = ProjectRiskAnalyzer()
 
         if enable_tool_poisoning:
             self.analyzers.append(ToolPoisoningAnalyzer())
@@ -104,8 +111,14 @@ class MCPScanner:
             result.parse_errors.append(f"File not found: {filepath}")
             return result
 
-        if not filepath.suffix == ".py":
-            result.parse_errors.append(f"Not a Python file: {filepath}")
+        if filepath.suffix.lower() != ".py":
+            try:
+                text = filepath.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                result.parse_errors.append(f"Could not read file: {exc}")
+                return result
+            result.files_scanned = 1
+            result.findings = self._filter(self.project_analyzer.analyze_artifact(filepath, text))
             return result
 
         # Parse the file
@@ -124,6 +137,9 @@ class MCPScanner:
         for analyzer in self.analyzers:
             findings = analyzer.analyze(server_info)
             result.findings.extend(findings)
+
+        result.findings.extend(self.project_analyzer.analyze_python(server_info))
+        result.findings = self._filter(self._dedupe(result.findings))
 
         return result
 
@@ -144,10 +160,10 @@ class MCPScanner:
             result.parse_errors.append(f"Directory not found: {directory}")
             return result
 
-        python_files = get_python_files(directory)
+        python_files = get_project_files(directory)
 
         if not python_files:
-            result.parse_errors.append(f"No Python files found in: {directory}")
+            result.parse_errors.append(f"No supported source, configuration, or manifest files found in: {directory}")
             return result
 
         for filepath in python_files:
@@ -159,6 +175,68 @@ class MCPScanner:
             result.findings.extend(file_result.findings)
             result.parse_errors.extend(file_result.parse_errors)
 
+        result.findings.extend(self._filter(self.project_analyzer.analyze_name_collisions(
+            self._collect_registered_names(python_files)
+        )))
+        result.findings = self._dedupe(result.findings)
+
+        return result
+
+    def _collect_registered_names(self, files: List[Path]) -> List[tuple[str, str, str]]:
+        names: List[tuple[str, str, str]] = []
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if path.suffix.lower() == ".py":
+                info = self.parser.parse_source(text, str(path))
+                if info.server_name:
+                    names.append(("server", str(info.server_name), str(path)))
+                names.extend(("tool", tool.name, str(path)) for tool in info.tools)
+            elif path.suffix.lower() == ".json":
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    data = None
+                if isinstance(data, dict):
+                    servers = data.get("mcpServers") or data.get("mcp_servers")
+                    if isinstance(servers, dict):
+                        names.extend(("server", str(name), str(path)) for name in servers)
+            else:
+                lines = text.splitlines()
+                for index, line in enumerate(lines):
+                    marker = re.match(r"^(\s*)(?:mcpServers|mcp_servers)\s*:\s*$", line)
+                    if not marker:
+                        continue
+                    base_indent = len(marker.group(1))
+                    for child in lines[index + 1:]:
+                        if not child.strip():
+                            continue
+                        indent = len(child) - len(child.lstrip())
+                        if indent <= base_indent:
+                            break
+                        match = re.match(r"^\s+([A-Za-z0-9_.-]+)\s*:\s*$", child)
+                        if match:
+                            names.append(("server", match.group(1), str(path)))
+        return names
+
+    def _filter(self, findings: List[Finding]) -> List[Finding]:
+        if not self.check:
+            return findings
+        if self.check in ATTACK_CATEGORIES:
+            return [finding for finding in findings if finding.attack_id == self.check]
+        return [finding for finding in findings if finding.rule_id == self.check]
+
+    @staticmethod
+    def _dedupe(findings: List[Finding]) -> List[Finding]:
+        result, seen = [], set()
+        for finding in findings:
+            key = (finding.rule_id or finding.matched_pattern, finding.file_path,
+                   finding.line_number, finding.function_name, finding.matched_text)
+            if key not in seen:
+                seen.add(key)
+                result.append(finding)
         return result
 
     def scan(self, target: str | Path) -> ScanResult:
@@ -212,6 +290,9 @@ class MCPScanner:
             findings = analyzer.analyze(server_info)
             result.findings.extend(findings)
 
+        result.findings.extend(self.project_analyzer.analyze_python(server_info))
+        result.findings = self._filter(self._dedupe(result.findings))
+
         return result
 
 
@@ -236,13 +317,15 @@ def scan_and_report(
         Exit code (0 = no issues, 1 = issues found, 2 = errors).
     """
     # Configure analyzers
-    enable_tool_poisoning = check is None or check == "tool-poisoning"
-    enable_prompt_injection = check is None or check == "prompt-injection"
+    normalized_check = normalize_check(check)
+    enable_tool_poisoning = normalized_check is None or normalized_check == "MCP03" or normalized_check == "MCP03-TOOL-POISON"
+    enable_prompt_injection = normalized_check is None or normalized_check == "MCP06" or normalized_check == "MCP06-UNTRUSTED-CONTEXT"
 
     scanner = MCPScanner(
         enable_tool_poisoning=enable_tool_poisoning,
         enable_prompt_injection=enable_prompt_injection,
         verbose=verbose,
+        check=normalized_check,
     )
 
     # Run scan

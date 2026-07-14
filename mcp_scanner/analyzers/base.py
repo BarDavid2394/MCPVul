@@ -53,6 +53,12 @@ class Finding:
     recommendation: Optional[str] = None
     code_snippet: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    attack_id: Optional[str] = None
+    rule_id: Optional[str] = None
+    confidence: str = "MEDIUM"
+    fixable: bool = False
+    source_kind: str = "python"
+    references: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert finding to dictionary for JSON serialization."""
@@ -69,6 +75,12 @@ class Finding:
             "recommendation": self.recommendation,
             "code_snippet": self.code_snippet,
             "metadata": self.metadata,
+            "attack_id": self.attack_id,
+            "rule_id": self.rule_id,
+            "confidence": self.confidence,
+            "fixable": self.fixable,
+            "source_kind": self.source_kind,
+            "references": self.references,
         }
 
 
@@ -125,6 +137,13 @@ class BaseAnalyzer(ABC):
         """
         Helper method to create a Finding with this analyzer's type.
         """
+        attack_id = {"tool_poisoning": "MCP03", "prompt_injection": "MCP06"}.get(self.vulnerability_type)
+        if attack_id:
+            kwargs.setdefault("attack_id", attack_id)
+            kwargs.setdefault("rule_id", "MCP03-TOOL-POISON" if attack_id == "MCP03" else "MCP06-UNTRUSTED-CONTEXT")
+            kwargs.setdefault("fixable", severity in (Severity.CRITICAL, Severity.HIGH))
+            kwargs.setdefault("confidence", "HIGH" if severity in (Severity.CRITICAL, Severity.HIGH) else "MEDIUM")
+            kwargs.setdefault("references", ["https://github.com/OWASP/www-project-mcp-top-10"])
         return Finding(
             vulnerability_type=self.vulnerability_type,
             severity=severity,

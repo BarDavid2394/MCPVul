@@ -60,6 +60,31 @@ def get_python_files(directory: str | Path) -> List[Path]:
     return sorted(python_files)
 
 
+SCANNABLE_CONFIG_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
+SCANNABLE_MANIFESTS = {
+    "requirements.txt", "pyproject.toml", "pipfile", "poetry.lock", "uv.lock",
+    "package.json", "package-lock.json", ".mcp.json", "claude_desktop_config.json",
+}
+
+
+def get_project_files(directory: str | Path) -> List[Path]:
+    """Return Python, MCP configuration, and dependency artifacts."""
+    path = Path(directory)
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        return []
+    files = []
+    skip_dirs = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".tox", "dist", "build"}
+    for item in path.rglob("*"):
+        if not item.is_file() or any(part in skip_dirs for part in item.parts):
+            continue
+        name = item.name.lower()
+        if item.suffix.lower() == ".py" or name in SCANNABLE_MANIFESTS or item.suffix.lower() in SCANNABLE_CONFIG_SUFFIXES:
+            files.append(item)
+    return sorted(set(files))
+
+
 def truncate_string(s: str, max_length: int = 100) -> str:
     """Truncate a string to max_length, adding ellipsis if truncated."""
     if len(s) <= max_length:

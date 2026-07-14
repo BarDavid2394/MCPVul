@@ -8,6 +8,7 @@ Based on Section 5.1.4 of the research paper:
 "Model Context Protocol (MCP): Landscape, Security Threats, and Future Research Directions"
 """
 
+import ast
 import re
 from typing import List, Optional
 
@@ -82,6 +83,8 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
             "Remove self-promotional language. Tool descriptions should be objective "
             "and not attempt to bias tool selection."
         ),
+        "invisible_unicode": "Remove invisible and bidirectional Unicode controls from tool metadata.",
+        "html_hidden_instruction": "Remove hidden HTML-comment instructions from tool metadata.",
     }
 
     def analyze(self, server_info: MCPServerInfo) -> List[Finding]:
@@ -155,19 +158,23 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
         """
         findings = []
 
-        # Look for suspicious string literals in the function body
-        # that might contain hidden instructions
-        string_pattern = r'["\']([^"\']{20,})["\']'
+        try:
+            tree = ast.parse(tool.function_body)
+        except SyntaxError:
+            return findings
 
-        for match in re.finditer(string_pattern, tool.function_body):
-            string_content = match.group(1)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            string_content = node.value
+            if len(string_content) < 20 or string_content == tool.docstring:
+                continue
 
             # Check this string against poisoning patterns
             for pattern_name, pattern_info in COMPILED_TOOL_POISONING.items():
                 if pattern_info["compiled"].search(string_content):
                     # Calculate approximate line number
-                    line_offset = tool.function_body[:match.start()].count("\n")
-                    line_number = tool.line_number + line_offset
+                    line_number = tool.line_number + getattr(node, "lineno", 1) - 1
 
                     finding = self.create_finding(
                         severity=self._get_severity(pattern_info["severity"]),

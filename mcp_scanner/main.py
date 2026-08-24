@@ -84,6 +84,23 @@ For more information, visit: https://github.com/mcp-security/mcp-scanner
         action="store_true",
         help="Disable colored output"
     )
+    scan_parser.add_argument(
+        "--review",
+        choices=["none", "llm"],
+        default="none",
+        help="Optionally attach constrained semantic reviews to ambiguous findings"
+    )
+    scan_parser.add_argument(
+        "--review-model",
+        default="gpt-5.6-luna",
+        help="OpenAI model for --review llm (default: gpt-5.6-luna)"
+    )
+    scan_parser.add_argument(
+        "--review-limit",
+        type=int,
+        default=25,
+        help="Maximum ambiguous findings sent for semantic review (default: 25)"
+    )
 
     # Fix command
     fix_parser = subparsers.add_parser(
@@ -164,6 +181,8 @@ def run_scan(args) -> int:
         exit_code = scan_and_report(
             target=str(target), output_format=args.format,
             output_file=args.output, verbose=args.verbose, check=args.check,
+            review=args.review, review_model=args.review_model,
+            review_limit=args.review_limit,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

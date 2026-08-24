@@ -23,6 +23,10 @@ class ToolDefinition:
     parameters: List[str]
     decorators: List[str]
     source_file: str
+    registration_style: str = "decorator"
+    declaration_line: Optional[int] = None
+    implementation_line: Optional[int] = None
+    implementation_source: str = ""
     raw_node: Any = field(repr=False, default=None)
 
     @property
@@ -65,6 +69,7 @@ class PythonMCPParser:
     def __init__(self):
         self.source_code = ""
         self.source_lines = []
+        self._constant_values: Dict[str, Any] = {}
 
     def parse_file(self, filepath: str | Path) -> MCPServerInfo:
         """
@@ -172,6 +177,7 @@ class PythonMCPParser:
     def _extract_tools(self, tree: ast.AST, filepath: str) -> List[ToolDefinition]:
         """Extract all tool definitions from the AST."""
         tools = []
+        self._constant_values = self._collect_static_constants(tree)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef):
@@ -180,7 +186,169 @@ class PythonMCPParser:
                     tool = self._create_tool_definition(node, tool_info, filepath)
                     tools.append(tool)
 
+        tools.extend(self._extract_low_level_tools(tree, filepath))
+
         return tools
+
+    def _extract_low_level_tools(self, tree: ast.AST, filepath: str) -> List[ToolDefinition]:
+        """Extract Tool(...) metadata registered through list_tools handlers.
+
+        Low-level MCP servers advertise tools separately from their call_tool
+        dispatcher. Keep the declaration and linked implementation branch in one
+        representation so later analyzers do not need to understand registration
+        style.
+        """
+        list_handlers = []
+        call_handlers = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = {self._get_decorator_name(dec) for dec in node.decorator_list}
+            if any(name == "list_tools" or name.endswith(".list_tools") for name in decorators):
+                list_handlers.append(node)
+            if any(name == "call_tool" or name.endswith(".call_tool") for name in decorators):
+                call_handlers.append(node)
+
+        tools = []
+        seen = set()
+        for handler in list_handlers:
+            declarations = [
+                node for node in ast.walk(handler)
+                if isinstance(node, ast.Call) and self._get_call_name(node) == "Tool"
+            ]
+            for node in declarations:
+                name = self._constant_call_argument(node, "name", 0)
+                if not isinstance(name, str) or name in seen:
+                    continue
+                description = self._constant_call_argument(node, "description", 1)
+                description = description if isinstance(description, str) else ""
+                parameters = self._schema_properties(node)
+                implementation = self._find_dispatch_branch(call_handlers, name)
+                if implementation is None and len(declarations) == 1 and len(call_handlers) == 1:
+                    implementation = call_handlers[0]
+                implementation_source = self._node_source(implementation) if implementation else ""
+                implementation_line = self._node_line(implementation) if implementation else None
+                tools.append(ToolDefinition(
+                    name=name,
+                    description=description,
+                    docstring=None,
+                    line_number=node.lineno,
+                    end_line_number=getattr(node, "end_lineno", node.lineno),
+                    # Existing analyzers assume a complete function here. Until
+                    # the evidence/data-flow layer consumes implementation_source,
+                    # avoid analyzing an entire dispatcher once per declared tool.
+                    function_body="def _low_level_tool():\n    pass",
+                    parameters=parameters,
+                    decorators=["server.list_tools", "server.call_tool"] if implementation else ["server.list_tools"],
+                    source_file=filepath,
+                    registration_style="low_level",
+                    declaration_line=node.lineno,
+                    implementation_line=implementation_line,
+                    implementation_source=implementation_source,
+                    raw_node=implementation or node,
+                ))
+                seen.add(name)
+        return tools
+
+    def _constant_call_argument(self, call: ast.Call, keyword_name: str, position: int) -> Any:
+        for keyword in call.keywords:
+            if keyword.arg == keyword_name:
+                return self._resolve_static_value(keyword.value)
+        if len(call.args) > position:
+            return self._resolve_static_value(call.args[position])
+        return None
+
+    @staticmethod
+    def _collect_static_constants(tree: ast.AST) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        for node in tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+                if isinstance(value, ast.Constant):
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            values[target.id] = value.value
+            if isinstance(node, ast.ClassDef):
+                for child in node.body:
+                    if isinstance(child, (ast.Assign, ast.AnnAssign)):
+                        targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                        value = child.value
+                        if isinstance(value, ast.Constant):
+                            for target in targets:
+                                if isinstance(target, ast.Name):
+                                    values[f"{node.name}.{target.id}"] = value.value
+        return values
+
+    def _resolve_static_value(self, node: ast.AST) -> Any:
+        if isinstance(node, ast.Constant):
+            return node.value
+        parts = []
+        current = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+            key = ".".join(reversed(parts))
+            if key.endswith(".value"):
+                key = key[:-6]
+            return self._constant_values.get(key)
+        if isinstance(node, ast.Name):
+            return self._constant_values.get(node.id)
+        return None
+
+    @staticmethod
+    def _schema_properties(call: ast.Call) -> List[str]:
+        """Extract literal inputSchema.properties keys when statically available."""
+        schema = None
+        for keyword in call.keywords:
+            if keyword.arg in {"inputSchema", "input_schema"}:
+                schema = keyword.value
+                break
+        if not isinstance(schema, ast.Dict):
+            return []
+        for key, value in zip(schema.keys, schema.values):
+            if isinstance(key, ast.Constant) and key.value == "properties" and isinstance(value, ast.Dict):
+                return [
+                    item.value for item in value.keys
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                ]
+        return []
+
+    def _find_dispatch_branch(self, handlers: List[ast.AST], tool_name: str) -> Optional[ast.AST]:
+        """Find an if/match branch comparing the dispatcher name to a tool name."""
+        for handler in handlers:
+            for node in ast.walk(handler):
+                if isinstance(node, ast.If):
+                    comparison_values = {
+                        value for part in ast.walk(node.test)
+                        if isinstance((value := self._resolve_static_value(part)), str)
+                    }
+                    if tool_name in comparison_values:
+                        return node
+                if isinstance(node, ast.match_case):
+                    pattern = node.pattern
+                    if isinstance(pattern, ast.MatchValue):
+                        if self._resolve_static_value(pattern.value) == tool_name:
+                            return node
+        return None
+
+    def _node_source(self, node: ast.AST) -> str:
+        start_line = self._node_line(node) or 1
+        start = max(0, start_line - 1)
+        end = getattr(node, "end_lineno", None)
+        if end is None and isinstance(node, ast.match_case) and node.body:
+            end = getattr(node.body[-1], "end_lineno", start_line)
+        end = end or start_line
+        return "\n".join(self.source_lines[start:end])
+
+    @staticmethod
+    def _node_line(node: ast.AST) -> Optional[int]:
+        line = getattr(node, "lineno", None)
+        if line is None and isinstance(node, ast.match_case):
+            line = getattr(node.pattern, "lineno", None)
+        return line
 
     def _check_tool_decorator(self, node: ast.FunctionDef) -> Optional[Dict[str, Any]]:
         """Check if a function has a tool decorator and extract its info."""
@@ -269,6 +437,10 @@ class PythonMCPParser:
             parameters=parameters,
             decorators=decorators,
             source_file=filepath,
+            registration_style="decorator",
+            declaration_line=node.lineno,
+            implementation_line=node.lineno,
+            implementation_source=function_body,
             raw_node=node,
         )
 

@@ -351,7 +351,9 @@ Other detected categories (not modified): {report.other_issues_after}
 
     print("-" * 64)
 
-    if report.verification_passed:
+    if dry_run and report.total_fixes_applied > 0:
+        print("\n  DRY RUN COMPLETE - Changes were previewed; no files were modified.")
+    elif report.verification_passed:
         print("\n  VERIFICATION PASSED - All vulnerabilities fixed!")
     elif report.total_issues_after == 0:
         print("\n  All detected issues have been addressed.")

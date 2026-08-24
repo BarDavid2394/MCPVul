@@ -61,6 +61,7 @@ def get_python_files(directory: str | Path) -> List[Path]:
 
 
 SCANNABLE_CONFIG_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
+SCANNABLE_SOURCE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 SCANNABLE_MANIFESTS = {
     "requirements.txt", "pyproject.toml", "pipfile", "poetry.lock", "uv.lock",
     "package.json", "package-lock.json", ".mcp.json", "claude_desktop_config.json",
@@ -80,7 +81,7 @@ def get_project_files(directory: str | Path) -> List[Path]:
         if not item.is_file() or any(part in skip_dirs for part in item.parts):
             continue
         name = item.name.lower()
-        if item.suffix.lower() == ".py" or name in SCANNABLE_MANIFESTS or item.suffix.lower() in SCANNABLE_CONFIG_SUFFIXES:
+        if item.suffix.lower() in SCANNABLE_SOURCE_SUFFIXES or name in SCANNABLE_MANIFESTS or item.suffix.lower() in SCANNABLE_CONFIG_SUFFIXES:
             files.append(item)
     return sorted(set(files))
 

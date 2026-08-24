@@ -37,6 +37,26 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
     description = "Detects malicious instructions hidden in tool descriptions"
     vulnerability_type = "tool_poisoning"
 
+    # These patterns are useful supporting evidence but are common in legitimate
+    # documentation. Report them only when the same metadata also contains a
+    # stronger concealment, override, exfiltration, or unauthorized-action signal.
+    CONTEXTUAL_PATTERNS = {
+        "url_in_description",
+        "command_execution",
+        "file_read_instruction",
+        "sequential_actions",
+        "sensitive_paths",
+        "imperative_must",
+        "tool_chaining",
+        "preference_manipulation",
+    }
+    BODY_PRIMARY_PATTERNS = {
+        "invisible_unicode",
+        "html_hidden_instruction",
+        "override_instructions",
+        "data_exfiltration",
+    }
+
     # Recommendations for each pattern type
     RECOMMENDATIONS = {
         "hidden_instruction_brackets": (
@@ -85,6 +105,22 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
         ),
         "invisible_unicode": "Remove invisible and bidirectional Unicode controls from tool metadata.",
         "html_hidden_instruction": "Remove hidden HTML-comment instructions from tool metadata.",
+        "cross_tool_prerequisite": (
+            "Remove mandatory cross-tool instructions. Tool selection and sequencing must "
+            "follow the user's request rather than directives embedded in tool metadata."
+        ),
+        "user_intent_override": "Remove metadata that claims precedence over the user's request.",
+        "forced_argument_change": (
+            "Remove instructions that silently alter another tool's arguments or the user's request."
+        ),
+        "concealed_action": "Remove instructions to hide tool actions or results from the user.",
+        "mandatory_shell_command": (
+            "Remove shell commands mandated by tool metadata. Tool descriptions must not require "
+            "unrelated command execution as a prerequisite or follow-up action."
+        ),
+        "coerced_followup_action": (
+            "Remove metadata that coerces an extra action or silently changes the requested operation."
+        ),
     }
 
     def analyze(self, server_info: MCPServerInfo) -> List[Finding]:
@@ -115,8 +151,16 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
             if not text:
                 continue
 
+            strong_signal = any(
+                pattern_name not in self.CONTEXTUAL_PATTERNS
+                and pattern_info["compiled"].search(text)
+                for pattern_name, pattern_info in COMPILED_TOOL_POISONING.items()
+            )
+
             # Check each poisoning pattern
             for pattern_name, pattern_info in COMPILED_TOOL_POISONING.items():
+                if pattern_name in self.CONTEXTUAL_PATTERNS and not strong_signal:
+                    continue
                 matches = pattern_info["compiled"].finditer(text)
 
                 for match in matches:
@@ -149,8 +193,41 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
         # Also analyze the function body for hidden instructions in strings
         body_findings = self._analyze_function_body(tool)
         findings.extend(body_findings)
+        mismatch = self._description_behavior_mismatch(tool)
+        if mismatch:
+            findings.append(mismatch)
 
         return findings
+
+    def _description_behavior_mismatch(self, tool: ToolDefinition):
+        """Flag a narrow, reviewable metadata/implementation contradiction."""
+        description = tool.full_description.lower()
+        body = tool.implementation_source or tool.function_body
+        if not description or not body:
+            return None
+        benign_claim = re.search(r"\b(calculate|format|convert|summari[sz]e|weather|time|echo|status|lookup|read[- ]?only)\b", description)
+        sensitive = re.search(
+            r"(?i)(?:subprocess\.|os\.system|child_process|execSync\s*\(|spawn\s*\(|"
+            r"os\.environ|process\.env|readFileSync\s*\(|writeFile(?:Sync)?\s*\(|unlink(?:Sync)?\s*\(|"
+            r"rmSync\s*\(|rmtree\s*\(|open\s*\([^)]*(?:ssh|aws|token|secret))",
+            body,
+        )
+        disclosure = re.search(r"(?i)\b(shell|command|process|credential|secret|environment|file)\b", description)
+        if not benign_claim or not sensitive or disclosure:
+            return None
+        return self.create_finding(
+            severity=Severity.MEDIUM,
+            title="Tool Poisoning: description and implementation differ",
+            description="The advertised benign behavior conflicts with sensitive process, file, or credential access in the implementation.",
+            file_path=tool.source_file,
+            line_number=tool.implementation_line or tool.line_number,
+            function_name=tool.name,
+            matched_pattern="description_behavior_mismatch",
+            matched_text=truncate_string(sensitive.group(0), 100),
+            recommendation="Make tool metadata accurately disclose sensitive behavior and require explicit authorization.",
+            metadata={"source": "description_vs_implementation", "advertised": benign_claim.group(0),
+                      "behavior": sensitive.group(0), "needs_semantic_review": True},
+        )
 
     def _analyze_function_body(self, tool: ToolDefinition) -> List[Finding]:
         """
@@ -163,8 +240,17 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
         except SyntaxError:
             return findings
 
+        docstring_nodes = set()
+        for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            if function.body and isinstance(function.body[0], ast.Expr):
+                value = function.body[0].value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    docstring_nodes.add(id(value))
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstring_nodes:
                 continue
             string_content = node.value
             if len(string_content) < 20 or string_content == tool.docstring:
@@ -172,6 +258,8 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
 
             # Check this string against poisoning patterns
             for pattern_name, pattern_info in COMPILED_TOOL_POISONING.items():
+                if pattern_name not in self.BODY_PRIMARY_PATTERNS:
+                    continue
                 if pattern_info["compiled"].search(string_content):
                     # Calculate approximate line number
                     line_number = tool.line_number + getattr(node, "lineno", 1) - 1

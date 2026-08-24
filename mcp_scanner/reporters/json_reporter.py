@@ -79,6 +79,7 @@ class JsonReporter:
             "by_severity": {},
             "by_type": {},
             "by_attack": {},
+            "by_rule": {},
             "by_confidence": {},
             "fixable": 0,
             "risk_score": 0,
@@ -95,6 +96,8 @@ class JsonReporter:
 
             if finding.attack_id:
                 summary["by_attack"][finding.attack_id] = summary["by_attack"].get(finding.attack_id, 0) + 1
+            if finding.rule_id:
+                summary["by_rule"][finding.rule_id] = summary["by_rule"].get(finding.rule_id, 0) + 1
             summary["by_confidence"][finding.confidence] = summary["by_confidence"].get(finding.confidence, 0) + 1
             if finding.fixable:
                 summary["fixable"] += 1

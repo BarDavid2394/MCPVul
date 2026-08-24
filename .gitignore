@@ -41,3 +41,15 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Reproducible third-party evaluation artifacts
+evaluation/corpus/
+evaluation/corpus-external/
+evaluation/holdout-corpus/
+evaluation/holdout-results/
+evaluation/holdout/.run-token
+evaluation/raw-results/
+evaluation/work/
+evaluation/*.log
+evaluation/*-llm-*.json
+.mcp-scanner-cache/

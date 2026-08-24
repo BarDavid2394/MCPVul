@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
 from .parsers.python_parser import PythonMCPParser, MCPServerInfo
+from .parsers.typescript_parser import TypeScriptMCPParser, SCRIPT_SUFFIXES
 from .analyzers.base import Finding, Severity
 from .analyzers.tool_poisoning import ToolPoisoningAnalyzer
 from .analyzers.prompt_injection import PromptInjectionAnalyzer
@@ -19,6 +20,7 @@ from .catalog import ATTACK_CATEGORIES, RULES, normalize_check
 from .reporters.console import ConsoleReporter
 from .reporters.json_reporter import JsonReporter
 from .utils.helpers import get_project_files
+from .security_graph import SecurityGraph
 
 
 @dataclass
@@ -84,6 +86,7 @@ class MCPScanner:
             verbose: Enable verbose output.
         """
         self.parser = PythonMCPParser()
+        self.script_parser = TypeScriptMCPParser()
         self.analyzers = []
         self.verbose = verbose
         self.check = normalize_check(check)
@@ -109,6 +112,18 @@ class MCPScanner:
 
         if not filepath.exists():
             result.parse_errors.append(f"File not found: {filepath}")
+            return result
+
+        if filepath.suffix.lower() in SCRIPT_SUFFIXES:
+            server_info = self.script_parser.parse_file(filepath)
+            result.files_scanned = 1
+            result.parse_errors.extend(server_info.parse_errors)
+            result.servers_found = int(bool(server_info.server_name))
+            result.tools_analyzed = len(server_info.tools)
+            for analyzer in self.analyzers:
+                result.findings.extend(analyzer.analyze(server_info))
+            result.findings.extend(self.project_analyzer.analyze_script(server_info))
+            result.findings = self._filter(self._dedupe(result.findings))
             return result
 
         if filepath.suffix.lower() != ".py":
@@ -175,6 +190,24 @@ class MCPScanner:
             result.findings.extend(file_result.findings)
             result.parse_errors.extend(file_result.parse_errors)
 
+        graph = SecurityGraph.build(directory, python_files)
+        project_tools = []
+        for path in python_files:
+            try:
+                if path.suffix.lower() == ".py":
+                    project_tools.extend(self.parser.parse_file(path).tools)
+            except (OSError, UnicodeError):
+                continue
+        result.findings.extend(self._filter(self.project_analyzer.analyze_cross_file_flows(graph, project_tools)))
+        protected_network_files = graph.protected_network_files()
+        if protected_network_files:
+            # A linked middleware/auth module is project-level evidence that a
+            # same-file heuristic cannot see. Keep permissive-bind warnings,
+            # but remove the weaker "no visible auth" claim.
+            result.findings = [f for f in result.findings if not (
+                f.rule_id == "MCP07-MISSING-AUTH" and Path(f.file_path).resolve() in protected_network_files
+            )]
+
         result.findings.extend(self._filter(self.project_analyzer.analyze_name_collisions(
             self._collect_registered_names(python_files)
         )))
@@ -191,6 +224,11 @@ class MCPScanner:
                 continue
             if path.suffix.lower() == ".py":
                 info = self.parser.parse_source(text, str(path))
+                if info.server_name:
+                    names.append(("server", str(info.server_name), str(path)))
+                names.extend(("tool", tool.name, str(path)) for tool in info.tools)
+            elif path.suffix.lower() in SCRIPT_SUFFIXES:
+                info = self.script_parser.parse_source(text, str(path))
                 if info.server_name:
                     names.append(("server", str(info.server_name), str(path)))
                 names.extend(("tool", tool.name, str(path)) for tool in info.tools)
@@ -275,7 +313,8 @@ class MCPScanner:
         result.files_scanned = 1
 
         # Parse the source
-        server_info = self.parser.parse_source(source_code, filename)
+        is_script = Path(filename).suffix.lower() in SCRIPT_SUFFIXES
+        server_info = (self.script_parser if is_script else self.parser).parse_source(source_code, filename)
 
         if server_info.parse_errors:
             result.parse_errors.extend(server_info.parse_errors)
@@ -290,7 +329,7 @@ class MCPScanner:
             findings = analyzer.analyze(server_info)
             result.findings.extend(findings)
 
-        result.findings.extend(self.project_analyzer.analyze_python(server_info))
+        result.findings.extend(self.project_analyzer.analyze_script(server_info) if is_script else self.project_analyzer.analyze_python(server_info))
         result.findings = self._filter(self._dedupe(result.findings))
 
         return result
@@ -302,6 +341,9 @@ def scan_and_report(
     output_file: str = None,
     verbose: bool = False,
     check: str = None,
+    review: str = "none",
+    review_model: str = "gpt-5.6-luna",
+    review_limit: int = 25,
 ) -> int:
     """
     Convenience function to scan and report in one step.
@@ -330,6 +372,16 @@ def scan_and_report(
 
     # Run scan
     result = scanner.scan(target)
+
+    if review == "llm":
+        from .reviewer import OpenAIReviewer
+        target_path = Path(target).resolve()
+        project_root = target_path if target_path.is_dir() else target_path.parent
+        reviewer = OpenAIReviewer(
+            model=review_model,
+            cache_dir=project_root / ".mcp-scanner-cache" / "reviews",
+        )
+        reviewer.review_findings(result.findings, project_root, limit=review_limit)
 
     # Prepare scan info
     scan_info = {

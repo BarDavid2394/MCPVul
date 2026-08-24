@@ -133,6 +133,26 @@ class ConsoleReporter:
         if finding.recommendation:
             print(self._color(f"    Fix: {finding.recommendation}", "DIM"))
 
+        review = finding.metadata.get("llm_review")
+        if review:
+            print(f"    Semantic review: {review.get('verdict')} ({review.get('confidence', 0):.0%})")
+            print(self._color(f"    Review reason: {review.get('reason', '')}", "DIM"))
+
+        evidence = finding.metadata.get("evidence")
+        if isinstance(evidence, dict):
+            source, sink = evidence.get("source"), evidence.get("sink")
+            if source or sink:
+                print(f"    Flow: {source or '?'} -> {sink or '?'}")
+            path = evidence.get("path") or []
+            if path:
+                print(self._color("    Path: " + " -> ".join(map(str, path)), "DIM"))
+            protections = evidence.get("protections") or []
+            missing = evidence.get("missing_protections") or []
+            if protections:
+                print(self._color("    Protections: " + ", ".join(map(str, protections)), "DIM"))
+            if missing:
+                print(self._color("    Missing: " + ", ".join(map(str, missing)), "DIM"))
+
         # Code snippet (if verbose)
         if self.verbose and finding.code_snippet:
             print(self._color("    Code:", "DIM"))

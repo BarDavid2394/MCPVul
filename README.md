@@ -1,5 +1,18 @@
 # MCP Security Scanner
 
+The scanner now analyzes a project as a connected security model, not only as
+independent files. It supports Python and common TypeScript/JavaScript MCP SDK
+registration styles, tracks tool input to command/network sinks, recognizes
+validation barriers, and resolves authentication evidence in linked modules.
+
+Optional AI review is deliberately secondary: deterministic analysis always
+creates the finding first. The reviewer receives a redacted, size-bounded source
+excerpt plus precomputed read-only definitions, callers, and authentication
+context. It cannot execute commands, access the network, or suppress findings.
+
+Evaluation corpora under `evaluation/holdout` remain frozen until a deliberate
+holdout run. Normal development and unit tests do not read or scan that corpus.
+
 A static security scanner for **MCP (Model Context Protocol)** projects. It scans Python source, MCP configuration, and dependency manifests against a versioned catalog based on the OWASP MCP Top 10 and official MCP security guidance.
 
 ## What is MCP?
@@ -94,6 +107,18 @@ cd MCPVul
 
 ## Usage
 
+### End-to-End Demo
+
+Run the complete local demonstration (catalog, clean scan, vulnerable scans,
+dry-run remediation, and tests) with one command:
+
+```bash
+python demo.py
+```
+
+The demo understands that exit code `1` is expected when a scan successfully
+finds vulnerabilities.
+
 ### Basic Scan
 
 ```bash
@@ -136,6 +161,24 @@ python -m mcp_scanner scan server.py --format json --output results.json
 # Verbose mode (shows code snippets)
 python -m mcp_scanner scan server.py --verbose
 ```
+
+### Optional semantic review
+
+Deterministic scanning remains the default. Ambiguous MCP06, MCP07, MCP10,
+MCP11, and MCP15 findings can optionally receive a constrained OpenAI review:
+
+```powershell
+$env:OPENAI_API_KEY = "..."
+python -m mcp_scanner scan project --review llm --review-limit 10 --format json
+```
+
+The reviewer sends only a bounded, secret-redacted excerpt around each finding,
+uses structured output with `store: false`, and caches verdicts under
+`.mcp-scanner-cache/`. Scanned code is explicitly treated as untrusted data, not
+instructions. Semantic review never removes or changes the deterministic
+finding; failure is recorded as `INSUFFICIENT_EVIDENCE`. Review is disabled by
+default because it sends selected source text to an external API and may incur
+cost.
 
 ### CI/CD Integration
 

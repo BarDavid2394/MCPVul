@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MCP Security Scanner — HTML Report</title>
+  <style>
+    :root{--navy:#102a43;--blue:#168bd2;--cyan:#18b7c9;--red:#d64550;--redbg:#fff2f3;--green:#16866a;--ink:#243b53;--muted:#627d98;--line:#d9e2ec;--panel:#f7fafc}
+    *{box-sizing:border-box} body{margin:0;background:#eaf1f7;color:var(--ink);font-family:"Segoe UI",Arial,sans-serif}
+    main{width:1400px;min-height:790px;margin:22px auto;padding:34px 44px 28px;background:#fff;border-top:8px solid var(--blue);box-shadow:0 14px 40px #102a4324}
+    header{display:flex;justify-content:space-between;align-items:flex-start}.eyebrow{color:var(--blue);font-size:15px;font-weight:800;letter-spacing:.09em;text-transform:uppercase}
+    h1{margin:5px 0;color:var(--navy);font-size:34px}.sub{color:var(--muted);font-size:16px}.badges{display:flex;gap:9px}.badge{padding:8px 13px;border:2px solid var(--cyan);border-radius:999px;color:#087985;font-size:12px;font-weight:800;letter-spacing:.07em}
+    .badge.json{border-color:#a7b7c8;color:var(--muted)}.metrics{display:grid;grid-template-columns:1.35fr repeat(4,1fr);gap:12px;margin:24px 0 20px}.metric{padding:15px 18px;background:var(--panel);border:1px solid var(--line);border-radius:11px}
+    .label{color:var(--muted);font-size:13px}.value{margin-top:4px;color:var(--navy);font-size:24px;font-weight:750}.danger{background:var(--redbg);border-color:#f5c2c7}.danger .value{color:var(--red)}
+    .finding{border:1px solid var(--line);border-radius:13px;overflow:hidden}.fhead{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:15px;padding:15px 19px;background:#fbfdff;border-bottom:1px solid var(--line)}
+    .severity{padding:7px 10px;border-radius:7px;background:var(--red);color:#fff;font-size:12px;font-weight:800}.title{color:var(--navy);font-size:20px;font-weight:750}.rule{color:var(--blue);font:700 14px Consolas,monospace}
+    .body{display:grid;grid-template-columns:1.02fr .98fr;gap:27px;padding:20px}h2{margin:0 0 9px;color:var(--navy);font-size:15px}.explanation{margin:0 0 15px;font-size:15px;line-height:1.45}.location{margin-bottom:14px;padding:10px 13px;border-left:4px solid var(--blue);background:var(--panel);font:13px Consolas,monospace}
+    pre{margin:0;padding:13px 15px;border-radius:8px;background:var(--navy);color:#e6f1fa;font:13px/1.5 Consolas,monospace}.source{color:#8fdbff}.sink{color:#ff9da5}.flow{display:flex;align-items:center;gap:7px;margin-bottom:15px}.node{flex:1;padding:11px 7px;border:1px solid #a9c9df;border-radius:8px;background:#eef7fc;text-align:center;font-size:12px;font-weight:700}.node.last{border-color:#f0a7ad;background:var(--redbg);color:#a82f39}.arrow{color:var(--blue);font-size:20px;font-weight:800}
+    .statusrow{display:grid;grid-template-columns:1fr 1fr;gap:10px}.status{padding:11px 13px;border-radius:8px;font-size:13px;line-height:1.4}.present{background:#eef9f5;border:1px solid #a9dfcf;color:var(--green)}.missing{background:var(--redbg);border:1px solid #f0b0b5;color:#9f3039}.status strong{display:block;margin-bottom:3px;color:var(--navy)}.recommend{margin-top:14px;padding:11px 13px;border-radius:8px;background:#eef7fc;font-size:13px;line-height:1.4}
+    details{margin-top:13px;padding:9px 13px;border:1px dashed #b8c9d8;border-radius:8px;color:var(--muted);font-size:12px}details pre{margin-top:9px;max-height:190px;overflow:auto;font-size:11px}footer{display:flex;justify-content:space-between;margin-top:13px;color:var(--muted);font-size:11px}@media print{body{background:#fff}main{margin:0;box-shadow:none}details{display:none}}
+  </style>
+</head>
+<body>
+<main>
+  <header><div><div class="eyebrow">MCP Server Security Scanner</div><h1>Security Analysis Report</h1><div class="sub">Human-readable view generated from the scanner's JSON report</div></div><div class="badges"><span class="badge json">JSON SOURCE</span><span class="badge">STATIC ANALYSIS</span></div></header>
+  <section class="metrics" id="metrics"></section>
+  <section id="findings"></section>
+  <details><summary>View the underlying JSON used to render this page</summary><pre id="raw"></pre></details>
+  <footer><span id="version"></span><span>Heuristic security evidence — not proof of exploitability</span></footer>
+</main>
+
+<script id="report-data" type="application/json">
+{
+  "scanner":"MCP Security Scanner","version":"2.0.0","catalog_version":"2026.1",
+  "scan_info":{"target":"presentation_report_sample.py","files_scanned":1,"tools_analyzed":1,"servers_found":1},
+  "summary":{"total":1,"by_severity":{"HIGH":1},"by_attack":{"MCP05":1},"by_rule":{"MCP05-COMMAND-INJECTION":1},"fixable":0,"risk_score":8,"risk_level":"HIGH"},
+  "findings":[{
+    "severity":"HIGH","title":"MCP05: Tool input reaches command execution","description":"Tool-controlled data can reach a command execution sink.",
+    "file_path":"presentation_report_sample.py","line_number":13,"function_name":"run_report","matched_text":"subprocess.run",
+    "recommendation":"Use a fixed executable and argument allowlist; never use shell=True with tool input.",
+    "metadata":{"evidence":{"rule_id":"MCP05-COMMAND-INJECTION","source":"command","sink":"subprocess.run","path":["command","cmd","subprocess.run"],"protections":[],"missing_protections":["fixed executable","argument allowlist"]}},
+    "attack_id":"MCP05","rule_id":"MCP05-COMMAND-INJECTION","confidence":"HIGH","fixable":false,"source_kind":"python"
+  }]
+}
+</script>
+<script>
+  const report=JSON.parse(document.getElementById('report-data').textContent), s=report.scan_info, sum=report.summary;
+  const metric=(label,value,cls='')=>`<div class="metric ${cls}"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+  document.getElementById('metrics').innerHTML=metric('Target',s.target)+metric('Files scanned',s.files_scanned)+metric('Tools recognized',s.tools_analyzed)+metric('Risk score',`${sum.risk_score}/10`)+metric('Findings',`${sum.total} ${sum.risk_level}`,'danger');
+  document.getElementById('findings').innerHTML=report.findings.map(f=>{const e=f.metadata.evidence;return `<article class="finding"><div class="fhead"><span class="severity">${f.severity}</span><span class="title">${f.title}</span><span class="rule">${f.rule_id}</span></div><div class="body"><div><h2>Finding</h2><p class="explanation">${f.description} The tool parameter <strong>${e.source}</strong> reaches <strong>${e.sink}</strong>.</p><div class="location">${f.file_path}:${f.line_number} • tool: ${f.function_name}</div><pre><span class="source">command</span> = request.command\ncmd = f"report-tool {<span class="source">command</span>}"\n<span class="sink">subprocess.run(cmd, shell=True)</span></pre></div><div><h2>Evidence path</h2><div class="flow">${e.path.map((p,i)=>`${i?'<span class="arrow">→</span>':''}<div class="node ${i===e.path.length-1?'last':''}">${p}</div>`).join('')}</div><div class="statusrow"><div class="status present"><strong>Visible protections</strong>${e.protections.length?e.protections.join('<br>'):'None detected'}</div><div class="status missing"><strong>Missing protections</strong>${e.missing_protections.join('<br>')}</div></div><div class="recommend"><strong>Recommended action:</strong> ${f.recommendation}</div></div></div></article>`}).join('');
+  document.getElementById('raw').textContent=JSON.stringify(report,null,2);
+  document.getElementById('version').textContent=`Scanner ${report.version} • Catalog ${report.catalog_version} • Synthetic presentation example`;
+</script>
+</body>
+</html>

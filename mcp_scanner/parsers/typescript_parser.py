@@ -42,7 +42,7 @@ class TypeScriptMCPParser:
             if not description_match and match.group(2) == "tool":
                 description_match = re.search(r"^[\s\S]*?['\"]" + re.escape(name) + r"['\"]\s*,\s*(['\"`])([\s\S]*?)\1", block)
             description = description_match.group(2) if description_match else ""
-            handler = re.search(r"(?:async\s*)?\(([^)]*)\)\s*=>\s*\{", block)
+            handler = re.search(r"(?:async\s*)?\(([^()]*)\)\s*=>\s*\{", block)
             if not handler:
                 handler = re.search(r"(?:async\s+)?function\s*\w*\s*\(([^)]*)\)\s*\{", block)
             implementation = block

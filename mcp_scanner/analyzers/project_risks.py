@@ -11,6 +11,11 @@ from ..catalog import ATTACK_CATEGORIES, RULES
 from ..evidence import Evidence
 from ..dataflow import PythonDataFlow
 from ..security_graph import SecurityGraph
+from ..secret_flow import SecretFlow
+from ..external_content import carries_file_text, carries_http_text
+from ..script_flow import code_mask, arguments as script_arguments, safe_git_argv, file_text_returns
+from ..literal_secrets import hardcoded_lines
+from ..reachable_python import ReachablePython, CODE_SINKS, depends, fixed_public_origin, privileged_origin, prefix
 from ..parsers.python_parser import MCPServerInfo, ToolDefinition
 
 
@@ -45,9 +50,16 @@ class ProjectRiskAnalyzer:
         except SyntaxError:
             return findings
 
+        for line in hardcoded_lines(tree):
+            findings.append(self._finding("MCP01-SECRET-HARDCODED", info.filepath, line,
+                "Python source embeds a credential-like literal.",
+                "Move credentials to a secret manager and rotate any exposed value.", "HIGH", "python", "[REDACTED]"))
+
         self._network_helpers = self._summarize_network_helpers(tree)
         self._module_constants = self._collect_module_constants(tree)
         self._command_helpers = PythonDataFlow().summarize_command_helpers(tree)
+        self._command_context = tree
+        self._reachable = ReachablePython(tree)
 
         for tool in info.tools:
             findings.extend(self._analyze_tool_ast(tool))
@@ -65,14 +77,31 @@ class ProjectRiskAnalyzer:
                             f"Global mutable state '{name}' may be shared across users or sessions.",
                             "Store context per authenticated user and session with expiry and explicit field allowlists.", "MEDIUM", matched=name))
 
-        if re.search(r"(?i)return\s+(?:dict\()?\s*(?:os\.environ|globals\(\)|locals\(\)|context|memory|history|session)(?:\)|\b)", source):
-            findings.append(self._finding("MCP10-OVER-SHARING", info.filepath, 1,
-                "A tool may return an entire environment or broad context object.",
-                "Return only explicitly selected fields and exclude credentials and unrelated session data.", "HIGH"))
-        if re.search(r"(?i)(return|logger\.[a-z]+|logging\.[a-z]+)\s*\([^\n]*(token|secret|password|authorization)", source):
-            findings.append(self._finding("MCP01-SECRET-OUTPUT", info.filepath, 1,
-                "Credential-bearing data appears to be returned or logged.",
-                "Redact credentials and never place them in tool output, model context, or logs.", "HIGH", matched="[REDACTED]"))
+        secret_flow = SecretFlow(tree)
+        for tool in info.tools:
+            if not isinstance(tool.raw_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            returned, _ = secret_flow.analyze(tool.raw_node)
+            for node, flags in returned:
+                if "secret" in flags:
+                    findings.append(self._finding("MCP01-SECRET-OUTPUT", info.filepath, node.lineno,
+                        "Credential-bearing data can reach a tool return value.",
+                        "Return selected non-secret fields and redact credentials before producing tool output.",
+                        "HIGH", "python", "[REDACTED]", tool.name))
+                if "broad" in flags:
+                    findings.append(self._finding("MCP10-OVER-SHARING", info.filepath, node.lineno,
+                        "A tool can return an entire environment or broad context object.",
+                        "Return explicitly selected fields without unrelated session data or credentials.",
+                        "HIGH", "python", "[REDACTED]", tool.name))
+        module_scope = ast.FunctionDef(name="<module>", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                                       body=tree.body, decorator_list=[])
+        functions = [module_scope] + [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for function in functions:
+            _, logs = secret_flow.analyze(function)
+            for call in logs:
+                findings.append(self._finding("MCP01-SECRET-OUTPUT", info.filepath, call.lineno,
+                    "Credential-bearing data can reach a logging call.",
+                    "Redact credentials before writing logs.", "HIGH", "python", "[REDACTED]", function.name))
 
         network_transport = re.search(r"(?i)(streamable[_-]?http|transport\s*=\s*['\"](?:http|sse)|fastapi|starlette|uvicorn)", source)
         server_construction = re.search(
@@ -189,13 +218,16 @@ class ProjectRiskAnalyzer:
     def _analyze_tool_ast(self, tool: ToolDefinition) -> List[Finding]:
         findings: List[Finding] = []
         try:
-            module = ast.parse(tool.function_body)
+            low_level = tool.registration_style == "low_level" and isinstance(tool.raw_node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            module = ast.Module(body=[tool.raw_node], type_ignores=[]) if low_level else ast.parse(tool.function_body)
         except SyntaxError:
             return findings
         params = set(tool.parameters)
         sensitive = False
         audited = bool(re.search(r"(?i)(audit|logger\.|logging\.|telemetry|trace)", tool.function_body))
-        command_flows = PythonDataFlow().command_flows(module, tool.parameters, getattr(self, "_command_helpers", {}))
+        flow_parameters = tool.parameters + ([a.arg for a in tool.raw_node.args.args] if low_level else [])
+        command_flows = PythonDataFlow().command_flows(module, flow_parameters, getattr(self, "_command_helpers", {}),
+                                                      getattr(self, "_command_context", None), tool.raw_node)
         flow_lines = {flow.line: flow for flow in command_flows}
         for node in ast.walk(module):
             if not isinstance(node, ast.Call):
@@ -203,7 +235,7 @@ class ProjectRiskAnalyzer:
             name = self._call_name(node.func).lower()
             dump = ast.dump(node)
             uses_param = any(re.search(rf"\b{re.escape(param)}\b", dump) for param in params)
-            line = tool.line_number + getattr(node, "lineno", 1) - 1
+            line = getattr(node, "lineno", 1) if low_level else tool.line_number + getattr(node, "lineno", 1) - 1
             flow = flow_lines.get(getattr(node, "lineno", 1))
             if flow:
                 sensitive = True
@@ -218,27 +250,68 @@ class ProjectRiskAnalyzer:
                 sensitive = True
             if name in {"eval", "exec", "compile"} and uses_param:
                 sensitive = True
-                findings.append(self._finding("MCP05-DYNAMIC-CODE", tool.source_file, line,
-                    "Tool input can reach dynamic code evaluation.", "Replace dynamic evaluation with a strict parser or operation allowlist.", "HIGH", "python", name, tool.name))
             if name in {"open", "pathlib.path.read_text", "pathlib.path.read_bytes"} or name.startswith(("subprocess.", "os.remove", "shutil.")):
                 sensitive = True
-        findings.extend(self._analyze_network_destinations(tool))
+        findings.extend(self._analyze_reachable_calls(tool))
         if sensitive and not audited:
             findings.append(self._finding("MCP08-MISSING-AUDIT", tool.source_file, tool.line_number,
                 "A sensitive tool performs file/process operations without visible audit telemetry.",
                 "Record actor, tool, approved parameters, outcome, and correlation ID without logging secrets.", "LOW", "python", function_name=tool.name))
         return findings
 
+    def _analyze_reachable_calls(self, tool):
+        root = tool.raw_node
+        context = getattr(self, "_command_context", None)
+        if not isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)) or context is None: return []
+        analysis = self._reachable
+        parameters = list(tool.parameters)
+        if tool.registration_style == "low_level": parameters += [a.arg for a in root.args.args]
+        calls = analysis.analyze(root, parameters)
+        findings = []
+        if any(carries_file_text(value) for value in analysis.returns):
+            findings.append(self._finding("MCP06-UNTRUSTED-CONTEXT", tool.source_file, tool.line_number,
+                "External file text reaches a tool return through a visible pathlib call path.",
+                "Keep external content separate from instructions and return validated structured data where possible.",
+                "MEDIUM", "python", "pathlib file text returned", tool.name))
+        if any(carries_http_text(value) for value in analysis.returns):
+            findings.append(self._finding('MCP06-UNTRUSTED-CONTEXT', tool.source_file, tool.line_number,
+                'HTTP response text or a textual JSON field reaches a tool return through aliases or helpers.',
+                'Treat response text as untrusted and apply a content boundary before returning it.',
+                'MEDIUM', 'python', 'HTTP text returned', tool.name))
+        for call in calls:
+            if call.name in CODE_SINKS | {'importlib.loader.exec_module'} and any(depends(a, analysis.parameters) for a in call.args):
+                finding = self._finding("MCP05-DYNAMIC-CODE", tool.source_file, call.line,
+                    "Tool input reaches code execution, dynamic import or unsafe deserialization through a visible call path.",
+                    "Use a strict parser or an explicit operation/module allowlist.", "HIGH", "python", call.name, tool.name)
+                finding.metadata['evidence'] = Evidence(finding.rule_id, 'tool-controlled parameter', call.name, list(call.path)+[call.name], [], ['safe parser', 'operation allowlist']).to_dict()
+                findings.append(finding)
+            if call.http and (depends(call.destination, analysis.parameters) or privileged_origin(call.destination)) and not fixed_public_origin(call.destination):
+                sink = call.path[1].split('.')[-1] if len(call.path)>1 else call.name
+                finding = self._finding("MCP13-SSRF", tool.source_file, call.line,
+                    "A tool can request a caller-controlled destination or privileged internal endpoint through a visible HTTP client.",
+                    "Allowlist schemes and destinations, block private/reserved addresses and validate redirects.", "HIGH", "python", call.name, tool.name)
+                finding.metadata['evidence'] = Evidence(finding.rule_id, 'tool-controlled parameter', sink+' destination', list(call.path)+[call.name+'(destination)'], [], ['destination validation']).to_dict()
+                destination = call.destination
+                if (isinstance(destination, ast.Call) and destination.args and fixed_public_origin(destination.args[0])
+                        and re.match(r'^https?://[^/?#]+[/?#]', prefix(destination.args[0])[0])):
+                    qualified = getattr(destination, '_resolved_name', '')
+                    if qualified and '.' in qualified:
+                        finding.metadata['unresolved_url_transform'] = qualified
+                findings.append(finding)
+        return findings
+
     def analyze_script(self, info: MCPServerInfo) -> List[Finding]:
         """Analyze TypeScript/JavaScript tools using the common source/sink model."""
         findings = self._text_checks(info.filepath, info.source_code, "typescript")
         command_names = set()
+        command_kinds = {}
         namespace_names = set()
         for imports in re.findall(r"import\s*\{([^}]+)\}\s*from\s*['\"](?:node:)?child_process['\"]", info.source_code):
             for item in imports.split(","):
                 parts = re.split(r"\s+as\s+", item.strip())
                 if parts and parts[0] in {"exec", "execSync", "spawn", "spawnSync", "execFile"}:
                     command_names.add(parts[-1])
+                    command_kinds[parts[-1]] = parts[0]
         namespace_names.update(re.findall(r"import\s+\*\s+as\s+(\w+)\s+from\s*['\"](?:node:)?child_process['\"]", info.source_code))
         for destructured in re.findall(r"(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\(['\"](?:node:)?child_process['\"]\)", info.source_code):
             command_names.update(x.strip().split(":")[-1].strip() for x in destructured.split(",") if x.strip())
@@ -247,6 +320,7 @@ class ProjectRiskAnalyzer:
         command_pattern = "|".join(command_patterns)
         for tool in info.tools:
             body = tool.implementation_source or tool.function_body
+            executable = code_mask(body)
             params = {p for p in tool.parameters if p}
             tainted = set(params)
             # Propagate aliases and template/string construction for four rounds.
@@ -258,11 +332,16 @@ class ProjectRiskAnalyzer:
             sink_prefix = rf"(?:{command_pattern}|(?<![.\w$])eval\s*\(|(?<![.\w$])Function\s*\()" if command_pattern else r"(?:(?<![.\w$])eval\s*\(|(?<![.\w$])Function\s*\()"
             sink_re = re.compile(sink_prefix + r"([^;\n]*)")
             for match in sink_re.finditer(body):
-                expression = match.group(1)
+                if not executable[match.start():match.start()+1].strip(): continue
+                opening = body.find('(', match.start())
+                args = script_arguments(body, opening)
+                if not args: continue
+                expression = ','.join(args)
                 used = next((p for p in tainted if re.search(rf"\b{re.escape(p)}\b", expression)), None)
                 if not used:
                     continue
                 sink = re.search(r"([A-Za-z]+)\s*\(", match.group(0)).group(1)
+                if safe_git_argv(command_kinds.get(sink, sink), args, body, match.start()): continue
                 rule = "MCP05-DYNAMIC-CODE" if sink in {"eval", "Function"} else "MCP05-COMMAND-INJECTION"
                 line = tool.implementation_line + body.count("\n", 0, match.start())
                 finding = self._finding(rule, info.filepath, line,
@@ -272,6 +351,13 @@ class ProjectRiskAnalyzer:
                 finding.metadata["evidence"] = Evidence(rule, used, sink, [used, sink], [],
                     ["fixed executable", "argument allowlist"]).__dict__
                 findings.append(finding)
+            filesystems = re.findall(r"import\s+(?:\*\s+as\s+)?(\w+)\s+from\s*['\"](?:node:)?fs(?:/promises)?['\"]", info.source_code)
+            for offset, name in file_text_returns(body, filesystems):
+                findings.append(self._finding('MCP06-UNTRUSTED-CONTEXT', info.filepath,
+                    (tool.implementation_line or tool.line_number)+body.count('\n',0,offset),
+                    'Whole file content reaches tool-visible output through a local alias.',
+                    'Return selected fields or introduce an explicit untrusted-content boundary.',
+                    'MEDIUM', 'typescript', name, tool.name))
             audited = bool(re.search(r"(?i)(audit|logger\.|console\.(?:info|warn|error)|telemetry|trace)", body))
             # Destination-specific network flow. A fixed origin with only a
             # tainted path/query is not SSRF.
@@ -487,7 +573,7 @@ class ProjectRiskAnalyzer:
 
     def _text_checks(self, path: str, text: str, kind: str) -> List[Finding]:
         findings: List[Finding] = []
-        for pattern in self.SECRET_PATTERNS:
+        for pattern in self.SECRET_PATTERNS if kind != "python" else []:
             for match in pattern.finditer(text):
                 findings.append(self._finding("MCP01-SECRET-HARDCODED", path, self._line(text, match.start()),
                     "A credential-like value is hard-coded in a scanned artifact.",

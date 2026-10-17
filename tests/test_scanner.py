@@ -65,7 +65,7 @@ async def call_tool(name, arguments):
         self.assertEqual("fetch", parsed.name)
         self.assertEqual("low_level", parsed.registration_style)
         self.assertEqual(["url"], parsed.parameters)
-        self.assertIn('name == "fetch"', parsed.implementation_source)
+        self.assertIn("async def call_tool", parsed.implementation_source)
         self.assertIsNotNone(parsed.implementation_line)
 
         result = MCPScanner().scan_source(source, "low_level.py")

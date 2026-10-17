@@ -80,15 +80,22 @@ class CodeTransformer:
         modified_lines: Set[int] = set()
         changes = []
         findings = findings or []
+        report_only_poison = {
+            finding.function_name for finding in findings
+            if getattr(finding, "attack_id", None) == "MCP03" and not getattr(finding, "fixable", False)
+        }
         poison_targets = {
             finding.function_name for finding in findings
             if getattr(finding, "attack_id", None) == "MCP03"
+            and getattr(finding, "fixable", False)
+            and finding.function_name not in report_only_poison
             and getattr(finding, "severity", None).value in {"CRITICAL", "HIGH"}
             and finding.function_name
         }
         prompt_targets = {
             finding.function_name for finding in findings
             if getattr(finding, "attack_id", None) == "MCP06"
+            and getattr(finding, "fixable", False)
             and getattr(finding, "severity", None).value in {"CRITICAL", "HIGH"}
             and finding.function_name
         }

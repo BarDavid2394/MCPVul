@@ -10,6 +10,9 @@ Based on Section 5.1.4 of the research paper:
 
 import ast
 import re
+from ..metadata_instructions import instruction_signals, mask_reported_examples
+import base64
+import binascii
 from typing import List, Optional
 
 from .base import BaseAnalyzer, Finding, Severity
@@ -19,6 +22,8 @@ from ..patterns.signatures import (
     COMPILED_SANITIZATION,
 )
 from ..utils.helpers import extract_context, truncate_string
+from ..metadata_behavior import discrepancies
+from ..reachable_python import ReachablePython
 
 
 class ToolPoisoningAnalyzer(BaseAnalyzer):
@@ -41,6 +46,7 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
     # documentation. Report them only when the same metadata also contains a
     # stronger concealment, override, exfiltration, or unauthorized-action signal.
     CONTEXTUAL_PATTERNS = {
+        "invisible_unicode",
         "url_in_description",
         "command_execution",
         "file_read_instruction",
@@ -51,7 +57,6 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
         "preference_manipulation",
     }
     BODY_PRIMARY_PATTERNS = {
-        "invisible_unicode",
         "html_hidden_instruction",
         "override_instructions",
         "data_exfiltration",
@@ -128,10 +133,24 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
         Analyze all tools in an MCP server for poisoning vulnerabilities.
         """
         self.reset()
+        try:
+            behavior = ReachablePython(ast.parse(server_info.source_code))
+        except SyntaxError:
+            behavior = None
 
         for tool in server_info.tools:
             tool_findings = self.analyze_tool(tool)
             self.findings.extend(tool_findings)
+            if behavior is not None and isinstance(tool.raw_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for line, pattern, reason, path in discrepancies(behavior, tool.raw_node, tool.parameters, tool.full_description):
+                    finding = self.create_finding(severity=Severity.MEDIUM,
+                        title='Tool Poisoning: advertised behavior needs review', description=reason,
+                        file_path=tool.source_file, line_number=line, function_name=tool.name,
+                        matched_pattern=pattern, matched_text=pattern,
+                        recommendation='Review the visible implementation and disclose sensitive behavior accurately.',
+                        metadata={'source':'description_vs_reachable_behavior', 'needs_semantic_review':True, 'call_path':list(path)})
+                    finding.fixable = False
+                    self.findings.append(finding)
 
         return self.findings
 
@@ -146,14 +165,41 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
             ("description", tool.description),
             ("docstring", tool.docstring or ""),
         ]
+        for source_name, text in list(texts_to_analyze):
+            if not text: continue
+            for token in re.findall(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,8192}={0,2}(?![A-Za-z0-9+/])", text)[:5]:
+                try:
+                    decoded = base64.b64decode(token, validate=True).decode("utf-8")
+                    if decoded and all(c.isprintable() or c in "\r\n\t" for c in decoded):
+                        texts_to_analyze.append(("decoded_"+source_name, decoded))
+                except (ValueError, UnicodeError, binascii.Error): pass
 
         for source_name, text in texts_to_analyze:
             if not text:
                 continue
+            for signal, excerpt in instruction_signals(text):
+                if excerpt.casefold() in text.casefold() and any(
+                        name not in self.CONTEXTUAL_PATTERNS and info["compiled"].fullmatch(excerpt)
+                        for name, info in COMPILED_TOOL_POISONING.items()):
+                    # Preserve the existing high-confidence literal fixer path;
+                    # do not add a duplicate report-only finding for that span.
+                    continue
+                finding = self.create_finding(
+                    severity=Severity.HIGH, title="Tool Poisoning: assistant-directed instruction",
+                    description="Untrusted tool metadata directs a policy override or disclosure of sensitive information.",
+                    file_path=tool.source_file, line_number=tool.line_number, function_name=tool.name,
+                    matched_pattern="metadata_" + signal, matched_text=truncate_string(excerpt, 100),
+                    recommendation="Review the instruction in context and remove unauthorized behavior from metadata.",
+                    code_snippet=truncate_string(text, 200),
+                    metadata={"source": source_name, "needs_semantic_review": True})
+                finding.fixable = False
+                findings.append(finding)
+            text = mask_reported_examples(text)
+            normalized = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069]", "", text)
 
             strong_signal = any(
                 pattern_name not in self.CONTEXTUAL_PATTERNS
-                and pattern_info["compiled"].search(text)
+                and pattern_info["compiled"].search(normalized)
                 for pattern_name, pattern_info in COMPILED_TOOL_POISONING.items()
             )
 
@@ -161,7 +207,7 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
             for pattern_name, pattern_info in COMPILED_TOOL_POISONING.items():
                 if pattern_name in self.CONTEXTUAL_PATTERNS and not strong_signal:
                     continue
-                matches = pattern_info["compiled"].finditer(text)
+                matches = pattern_info["compiled"].finditer(text if pattern_name == "invisible_unicode" else normalized)
 
                 for match in matches:
                     severity = self._get_severity(pattern_info["severity"])
@@ -189,6 +235,9 @@ class ToolPoisoningAnalyzer(BaseAnalyzer):
                         }
                     )
                     findings.append(finding)
+                    if (source_name.startswith("decoded_") or tool.description_derived
+                            or pattern_name in {"system_role_impersonation", "system_safety_bypass"}):
+                        finding.fixable = False
 
         # Also analyze the function body for hidden instructions in strings
         body_findings = self._analyze_function_body(tool)

@@ -37,6 +37,23 @@ The book reports the observed state, including the validation defects. It does n
 | assets/ | PNG and SVG figures used in the book |
 | working/ | Extraction/layout checks and test log; intermediate material, not submission content |
 
+## Latest final project materials (17 October 2026)
+
+- [Final results (PDF)](Final_Project_Results.pdf), [HTML](Final_Project_Results.html),
+  and [Markdown](Final_Project_Results.md).
+- [Presentation revision guide (PDF)](Final_Presentation_Revision_Plan.pdf),
+  [HTML](Final_Presentation_Revision_Plan.html), and [Markdown](Final_Presentation_Revision_Plan.md).
+- [Follow-up validation](Followup_Validation_Report.md),
+  [original validation](Final_Validation_Report.md), and its
+  [evidence archive](Final_Validation_Evidence.zip).
+- Development chart: [SVG](final_results_development.svg) or
+  [PNG](final_results_development.png).
+
+The book and earlier presenter notes are dated snapshots. Use the final results
+and revision guide for current evaluation figures and demo instructions. For a
+fresh scan, run `python demo.py tests/samples/vulnerable_tool_poisoning.py` from
+the repository root and open the HTML link printed by the command.
+
 ## Rebuilding
 
 The scanner still requires no added core dependencies. Document generation uses `python-docx`, `matplotlib` and `reportlab`; PDF inspection used `pymupdf`. Additional document packages were installed in the temporary `mcp-book-libs` folder, not in project requirements.

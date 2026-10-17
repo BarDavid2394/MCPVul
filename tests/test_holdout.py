@@ -1,9 +1,11 @@
 import importlib.util
+import hashlib
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "evaluation" / "scripts"
@@ -65,6 +67,53 @@ class HoldoutTests(unittest.TestCase):
             run_holdout.token_digest(token, "a" * 64),
             run_holdout.token_digest(token, "b" * 64),
         )
+
+    def test_conflicting_labels_are_rejected(self):
+        data = self.manifest()
+        data["labels"].append({**data["labels"][0], "polarity": "negative"})
+        self.assertTrue(any("conflicting" in e for e in holdout_common.validate(data)))
+
+    def test_preflight_rechecks_artifact_hashes(self):
+        runner = load_module("run_holdout")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source/server.py"
+            source.parent.mkdir()
+            source.write_bytes(b"original")
+            data = self.manifest()
+            data["artifacts"][0]["sha256"] = "sha256:" + hashlib.sha256(b"original").hexdigest()
+            self.assertEqual([source.resolve()], runner.preflight_artifacts(data, root))
+            source.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                runner.preflight_artifacts(data, root)
+
+    def test_preflight_rejects_paths_outside_corpus(self):
+        runner = load_module("run_holdout")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = self.manifest()
+            data["artifacts"][0]["path"] = "../../outside.py"
+            with self.assertRaises(ValueError): runner.preflight_artifacts(data, root)
+
+    def test_failed_negative_is_not_scored_clean(self):
+        scorer = load_module("score_holdout")
+        data = self.manifest()
+        data["labels"][0]["polarity"] = "negative"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "evaluation/holdout"
+            destination.mkdir(parents=True)
+            results = root / "results"
+            results.mkdir()
+            consumed = destination / "CONSUMED.json"
+            consumed.write_text(json.dumps(dict(manifest_fingerprint="frozen", status="completed", code_unchanged=True)))
+            (results / "artifact.json").write_text(json.dumps(dict(findings=[], scan_info=dict(files_scanned=0, parse_errors=["failed"]))))
+            with patch.multiple(scorer, ROOT=root, RESULTS=results, CONSUMED=consumed,
+                                verify_frozen=lambda: (data, "frozen")), patch("builtins.print"):
+                self.assertEqual(0, scorer.main())
+            result = json.loads((destination / "metrics.json").read_text())
+            self.assertEqual(1, result["micro"]["errors"])
+            self.assertEqual(0, result["micro"]["tn"])
 
 
 if __name__ == "__main__":

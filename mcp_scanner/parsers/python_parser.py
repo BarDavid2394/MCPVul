@@ -6,6 +6,10 @@ for security analysis.
 """
 
 import ast
+import copy
+import textwrap
+from ..static_values import StaticValues
+from ..python_bindings import PythonBindings, dotted
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -28,6 +32,7 @@ class ToolDefinition:
     implementation_line: Optional[int] = None
     implementation_source: str = ""
     raw_node: Any = field(repr=False, default=None)
+    description_derived: bool = False
 
     @property
     def full_description(self) -> str:
@@ -178,6 +183,7 @@ class PythonMCPParser:
         """Extract all tool definitions from the AST."""
         tools = []
         self._constant_values = self._collect_static_constants(tree)
+        self._literal_evaluator = StaticValues(tree)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef):
@@ -187,7 +193,70 @@ class PythonMCPParser:
                     tools.append(tool)
 
         tools.extend(self._extract_low_level_tools(tree, filepath))
+        tools.extend(self._extract_programmatic_tools(tree, filepath, tools))
 
+        return tools
+
+    def _extract_programmatic_tools(self, tree, filepath, existing):
+        """Resolve direct add_tool calls on a visibly constructed FastMCP receiver."""
+        bindings = PythonBindings(tree)
+        tools = []
+        seen = {id(t.raw_node) for t in existing}
+        scopes = [tree] + [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        for scope in scopes:
+            nodes = list(ast.walk(scope)) if isinstance(scope, ast.ClassDef) else list(scope.body)
+            constructors, writes = {}, {}
+            for node in nodes:
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        key = dotted(target)
+                        writes[key] = writes.get(key, 0)+1
+                        if isinstance(node.value, ast.Call) and bindings.resolve(node.value.func) in {"fastmcp.FastMCP", "mcp.server.fastmcp.FastMCP"}:
+                            constructors[key] = node.lineno
+            definitions = {}
+            for node in scope.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    definitions[node.name] = node if node.name not in definitions else None
+            calls = [n for node in nodes for n in ([node.value] if isinstance(node, ast.Expr) else [node]) if isinstance(n, ast.Call)]
+            for call in calls:
+                # FastMCP also exposes the decorator as mcp.tool(...)(handler).
+                registration = call.func if isinstance(call.func, ast.Call) else call
+                method = registration.func
+                curried = registration is not call
+                if not isinstance(method, ast.Attribute) or method.attr != ("tool" if curried else "add_tool") or len(call.args) != 1: continue
+                receiver = dotted(method.value)
+                if receiver not in constructors or writes.get(receiver) != 1 or call.lineno <= constructors[receiver]: continue
+                handler = call.args[0]
+                if isinstance(scope, ast.ClassDef):
+                    if not isinstance(handler, ast.Attribute) or not isinstance(handler.value, ast.Name) or handler.value.id != "self": continue
+                    target = definitions.get(handler.attr)
+                else:
+                    target = definitions.get(handler.id) if isinstance(handler, ast.Name) else None
+                if target is None or id(target) in seen: continue
+                info = {"description": ""}
+                for keyword in registration.keywords:
+                    if keyword.arg == "description":
+                        try:
+                            value = self._literal_evaluator.resolve(keyword.value)
+                            if isinstance(value, str): info["description"] = value
+                        except (ValueError, TypeError): pass
+                tool = self._create_tool_definition(target, info, filepath)
+                # Resolve a single explicit __doc__ assignment before registration.
+                # Never execute the handler or metadata expression.
+                doc_writes = [n for n in nodes if isinstance(n, ast.Assign) and any(
+                    isinstance(t, ast.Attribute) and t.attr == "__doc__"
+                    and isinstance(t.value, ast.Name) and t.value.id == target.name for t in n.targets)]
+                if len(doc_writes) == 1 and target.lineno < doc_writes[0].lineno < call.lineno:
+                    try:
+                        doc = self._literal_evaluator.resolve(doc_writes[0].value)
+                        if isinstance(doc, str): tool.docstring = doc
+                    except (ValueError, TypeError): pass
+                tool.description_derived = True
+                tool.registration_style = "programmatic"
+                tool.declaration_line = call.lineno
+                tools.append(tool)
+                seen.add(id(target))
         return tools
 
     def _extract_low_level_tools(self, tree: ast.AST, filepath: str) -> List[ToolDefinition]:
@@ -211,11 +280,30 @@ class PythonMCPParser:
 
         tools = []
         seen = set()
+        # Resolve only uniquely assigned literal lists returned by a handler.
+        # Do not execute factories or guess across conflicting assignments.
+        lists = {}
+        for statement in tree.body:
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        lists[target.id] = statement.value if target.id not in lists else None
+        def declarations_in(value, visited=frozenset()):
+            if isinstance(value, ast.Name) and value.id not in visited:
+                return declarations_in(lists.get(value.id), visited | {value.id})
+            if isinstance(value, (ast.List, ast.Tuple)):
+                return [item for item in value.elts if isinstance(item, ast.Call) and self._get_call_name(item) == "Tool"]
+            return []
         for handler in list_handlers:
-            declarations = [
-                node for node in ast.walk(handler)
-                if isinstance(node, ast.Call) and self._get_call_name(node) == "Tool"
-            ]
+            declarations = []
+            for returned in (n for n in ast.walk(handler) if isinstance(n, ast.Return)):
+                declarations.extend(declarations_in(returned.value))
+            receiver = next(self._get_decorator_name(d).rsplit(".", 1)[0] for d in handler.decorator_list
+                            if self._get_decorator_name(d).endswith(".list_tools")) if any(
+                                self._get_decorator_name(d).endswith(".list_tools") for d in handler.decorator_list) else ""
+            linked_handlers = [h for h in call_handlers if any(
+                self._get_decorator_name(d) == (receiver + "." if receiver else "") + "call_tool" for d in h.decorator_list)]
             for node in declarations:
                 name = self._constant_call_argument(node, "name", 0)
                 if not isinstance(name, str) or name in seen:
@@ -223,10 +311,10 @@ class PythonMCPParser:
                 description = self._constant_call_argument(node, "description", 1)
                 description = description if isinstance(description, str) else ""
                 parameters = self._schema_properties(node)
-                implementation = self._find_dispatch_branch(call_handlers, name)
-                if implementation is None and len(declarations) == 1 and len(call_handlers) == 1:
-                    implementation = call_handlers[0]
-                implementation_source = self._node_source(implementation) if implementation else ""
+                implementation = self._find_dispatch_branch(linked_handlers, name)
+                if implementation is None and len(declarations) == 1 and len(linked_handlers) == 1:
+                    implementation = linked_handlers[0]
+                implementation_source = ast.unparse(implementation) if implementation else ""
                 implementation_line = self._node_line(implementation) if implementation else None
                 tools.append(ToolDefinition(
                     name=name,
@@ -234,9 +322,8 @@ class PythonMCPParser:
                     docstring=None,
                     line_number=node.lineno,
                     end_line_number=getattr(node, "end_lineno", node.lineno),
-                    # Existing analyzers assume a complete function here. Until
-                    # the evidence/data-flow layer consumes implementation_source,
-                    # avoid analyzing an entire dispatcher once per declared tool.
+                    # Project analyzers use the isolated raw implementation.
+                    # Keep legacy text/fixer analyzers away from a synthetic body.
                     function_body="def _low_level_tool():\n    pass",
                     parameters=parameters,
                     decorators=["server.list_tools", "server.call_tool"] if implementation else ["server.list_tools"],
@@ -317,22 +404,40 @@ class PythonMCPParser:
         return []
 
     def _find_dispatch_branch(self, handlers: List[ast.AST], tool_name: str) -> Optional[ast.AST]:
-        """Find an if/match branch comparing the dispatcher name to a tool name."""
+        """Build a function with the shared prelude and only the matched branch.
+
+        Including an entire if/elif chain incorrectly attributes sibling sinks.
+        Ambiguous comparisons are deliberately left unlinked.
+        """
+        matches = []
         for handler in handlers:
-            for node in ast.walk(handler):
-                if isinstance(node, ast.If):
-                    comparison_values = {
-                        value for part in ast.walk(node.test)
-                        if isinstance((value := self._resolve_static_value(part)), str)
-                    }
-                    if tool_name in comparison_values:
-                        return node
-                if isinstance(node, ast.match_case):
-                    pattern = node.pattern
-                    if isinstance(pattern, ast.MatchValue):
-                        if self._resolve_static_value(pattern.value) == tool_name:
-                            return node
-        return None
+            if not handler.args.args: continue
+            discriminant = handler.args.args[0].arg
+            prefix = []
+            for statement in handler.body:
+                selected = None
+                node = statement
+                while isinstance(node, ast.If):
+                    test = node.test
+                    if (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
+                            and test.left.id == discriminant and len(test.ops) == len(test.comparators) == 1
+                            and self._resolve_static_value(test.comparators[0]) == tool_name):
+                        if isinstance(test.ops[0], ast.Eq): selected = node.body
+                        elif isinstance(test.ops[0], ast.NotEq): selected = node.orelse
+                        break
+                    node = node.orelse[0] if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If) else None
+                if isinstance(statement, ast.Match) and isinstance(statement.subject, ast.Name) and statement.subject.id == discriminant:
+                    for case in statement.cases:
+                        if isinstance(case.pattern, ast.MatchValue) and self._resolve_static_value(case.pattern.value) == tool_name:
+                            selected = case.body
+                if selected:
+                    function = copy.deepcopy(handler)
+                    function.body = copy.deepcopy(prefix + selected)
+                    function.decorator_list = []
+                    matches.append(function)
+                    break
+                prefix.append(statement)
+        return matches[0] if len(matches) == 1 else None
 
     def _node_source(self, node: ast.AST) -> str:
         start_line = self._node_line(node) or 1
@@ -364,8 +469,12 @@ class PythonMCPParser:
                     # Check for description keyword argument
                     for keyword in decorator.keywords:
                         if keyword.arg == "description":
-                            if isinstance(keyword.value, ast.Constant):
-                                info["description"] = keyword.value.value
+                            try:
+                                value = self._literal_evaluator.resolve(keyword.value)
+                                if isinstance(value, str):
+                                    info["description"] = value
+                                    info["description_derived"] = not isinstance(keyword.value, ast.Constant)
+                            except (ValueError, TypeError): pass
 
                     # Check for positional description argument
                     if decorator.args:
@@ -412,7 +521,7 @@ class PythonMCPParser:
         # Get function body as source code
         start_line = node.lineno - 1
         end_line = node.end_lineno if node.end_lineno else start_line + 1
-        function_body = "\n".join(self.source_lines[start_line:end_line])
+        function_body = textwrap.dedent("\n".join(self.source_lines[start_line:end_line]))
 
         # Extract parameter names
         parameters = []
@@ -442,6 +551,7 @@ class PythonMCPParser:
             implementation_line=node.lineno,
             implementation_source=function_body,
             raw_node=node,
+            description_derived=tool_info.get("description_derived", False),
         )
 
     def _extract_imports(self, tree: ast.AST) -> List[str]:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .dataflow import PythonDataFlow
 from .parsers.python_parser import ToolDefinition
+from .reachable_python import ReachablePython, prefix
 
 
 AUTH_RE = re.compile(r"(?i)(authorization|oauth|bearer|authmiddleware|verify_token|require_auth|permission)")
@@ -29,7 +30,7 @@ class SecurityGraph:
     auth_files: set[Path] = field(default_factory=set)
     auth_enforced_files: set[Path] = field(default_factory=set)
     network_files: set[Path] = field(default_factory=set)
-    command_helpers: dict[str, list[tuple[Path, int, str]]] = field(default_factory=dict)
+    command_helpers: dict[str, list[tuple[Path, int | tuple[int, ...], str]]] = field(default_factory=dict)
     sources: dict[Path, str] = field(default_factory=dict)
 
     @classmethod
@@ -102,6 +103,38 @@ class SecurityGraph:
     def project_has_auth(self) -> bool:
         return bool(self.protected_network_files())
 
+    def preserves_url_origin(self, qualified_name: str) -> bool:
+        """Prove a uniquely linked local transform preserves its first URL arg.
+
+        Only suppress when every visible return retains the exact sentinel
+        origin. Unknown calls/branches remain unproven. No source execution.
+        """
+        module, _, name = qualified_name.rpartition('.')
+        suffix = module.replace('.', '/') + '.py'
+        matches = [p for p in self.sources if p.as_posix().endswith('/'+suffix)]
+        if len(matches) != 1: return False
+        try:
+            tree = ast.parse(self.sources[matches[0]])
+        except SyntaxError:
+            return False
+        functions = [n for n in tree.body if isinstance(n, (ast.FunctionDef,ast.AsyncFunctionDef)) and n.name == name]
+        if len(functions) != 1: return False
+        function = functions[0]
+        if any(isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store,ast.Del)) and n.id == name for n in ast.walk(tree)): return False
+        unsupported = (ast.Match,ast.NamedExpr,ast.Global,ast.Nonlocal,ast.Delete,ast.Yield,ast.YieldFrom)
+        if any(isinstance(n, unsupported) for n in ast.walk(function)): return False
+        args = function.args.posonlyargs + function.args.args
+        if not args or function.decorator_list: return False
+        marker = 'https://scanner-origin.invalid/path?query=fixed'
+        analysis = ReachablePython(tree)
+        analysis.analyze(function, [a.arg for a in args], {args[0].arg:ast.Constant(marker)})
+        if any(c.name in {'eval','exec','globals','locals','setattr','__import__'} for c in analysis.calls): return False
+        def retained(value):
+            if isinstance(value, ast.Tuple): return bool(value.elts) and all(retained(v) for v in value.elts)
+            text, _ = prefix(value)
+            return text.startswith(marker)
+        return bool(analysis.returns) and analysis.remaining > 0 and all(retained(value) for value in analysis.returns)
+
     def cross_file_command_flows(self, tools: list[ToolDefinition]):
         """Find tool calls into command wrappers defined in another module."""
         helpers = {name: (items[0][1], items[0][2]) for name, items in self.command_helpers.items()
@@ -109,7 +142,13 @@ class SecurityGraph:
         for tool in tools:
             if tool.raw_node is None:
                 continue
-            for flow in PythonDataFlow().command_flows(tool.raw_node, tool.parameters, helpers):
+            try:
+                context = ast.parse(self.sources.get(Path(tool.source_file).resolve(), ""))
+            except SyntaxError:
+                context = None
+            parameters = tool.parameters + ([a.arg for a in tool.raw_node.args.args]
+                if tool.registration_style == "low_level" and isinstance(tool.raw_node, (ast.FunctionDef, ast.AsyncFunctionDef)) else [])
+            for flow in PythonDataFlow().command_flows(tool.raw_node, parameters, helpers, context):
                 helper = next((part[:-2] for part in flow.path if part.endswith("()")), None)
                 definitions = self.command_helpers.get(helper or "", [])
                 if definitions and all(path.resolve() != Path(tool.source_file).resolve() for path, _, _ in definitions):

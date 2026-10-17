@@ -52,7 +52,7 @@ def get_python_files(directory: str | Path) -> List[Path]:
     for item in path.rglob("*.py"):
         # Skip common non-source directories
         parts = item.parts
-        skip_dirs = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".tox"}
+        skip_dirs = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".tox", ".mcp-scanner-cache"}
         if any(skip_dir in parts for skip_dir in skip_dirs):
             continue
         python_files.append(item)
@@ -76,7 +76,7 @@ def get_project_files(directory: str | Path) -> List[Path]:
     if not path.is_dir():
         return []
     files = []
-    skip_dirs = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".tox", "dist", "build"}
+    skip_dirs = {"__pycache__", ".git", ".venv", "venv", "node_modules", ".tox", "dist", "build", ".mcp-scanner-cache"}
     for item in path.rglob("*"):
         if not item.is_file() or any(part in skip_dirs for part in item.parts):
             continue

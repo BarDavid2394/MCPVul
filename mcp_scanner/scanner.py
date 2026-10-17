@@ -199,6 +199,14 @@ class MCPScanner:
             except (OSError, UnicodeError):
                 continue
         result.findings.extend(self._filter(self.project_analyzer.analyze_cross_file_flows(graph, project_tools)))
+        url_transform_proofs = {}
+        for finding in result.findings:
+            transform = finding.metadata.get('unresolved_url_transform')
+            if transform and transform not in url_transform_proofs:
+                url_transform_proofs[transform] = graph.preserves_url_origin(transform)
+        result.findings = [f for f in result.findings if not (
+            f.rule_id == 'MCP13-SSRF' and url_transform_proofs.get(f.metadata.get('unresolved_url_transform'), False)
+        )]
         protected_network_files = graph.protected_network_files()
         if protected_network_files:
             # A linked middleware/auth module is project-level evidence that a

@@ -10,8 +10,26 @@ creates the finding first. The reviewer receives a redacted, size-bounded source
 excerpt plus precomputed read-only definitions, callers, and authentication
 context. It cannot execute commands, access the network, or suppress findings.
 
-Evaluation corpora under `evaluation/holdout` remain frozen until a deliberate
-holdout run. Normal development and unit tests do not read or scan that corpus.
+The original holdout and the separate follow-up reserve have both been consumed.
+Their frozen manifests, predictions, and results are retained as historical
+evidence; neither is an untouched test set for further tuning. Normal unit tests
+do not scan those corpora.
+
+## Final project results
+
+- [Results report (PDF)](deliverables/Final_Project_Results.pdf) or
+  [readable Markdown](deliverables/Final_Project_Results.md).
+- [Final presentation revision guide (PDF)](deliverables/Final_Presentation_Revision_Plan.pdf)
+  or [Markdown](deliverables/Final_Presentation_Revision_Plan.md).
+- [Follow-up validation](deliverables/Followup_Validation_Report.md) and
+  [original validation](deliverables/Final_Validation_Report.md).
+
+On the previously exposed 50-label development set, recall improved from 43.3%
+to 53.3% and false alarms fell from one to zero. The subsequent ten-file reserve
+missed both positive labels because handwritten JSON-RPC tools were not
+recognized. These measurements have different scopes and are reported separately.
+The live demo below runs a fresh static scan of the supplied file or directory
+and prints a link to its HTML report.
 
 A static security scanner for **MCP (Model Context Protocol)** projects. It scans Python source, MCP configuration, and dependency manifests against a versioned catalog based on the OWASP MCP Top 10 and official MCP security guidance.
 
@@ -107,13 +125,53 @@ cd MCPVul
 
 ## Usage
 
-### End-to-End Demo
+### Live Demo: Scan Your Server
 
-Run the complete local demonstration (catalog, clean scan, vulnerable scans,
-dry-run remediation, and tests) with one command:
+Supply a server file or project directory. The analyzer reads that path and
+prints fresh findings with rule IDs, severity, locations, evidence, and
+recommendations:
+
+```powershell
+python demo.py "C:\projects\my-mcp-server\server.py"
+python demo.py "C:\projects\my-mcp-server"
+```
+
+For a ready-to-run example:
+
+```powershell
+python demo.py tests\samples\vulnerable_tool_poisoning.py
+```
+
+Each scan also creates a standalone HTML report and prints its `file:///...`
+link in the terminal. Ctrl+click the link to open it in your browser. Reports
+are saved under `.mcp-scanner-cache/reports/` with a unique filename for each
+run. To choose a fixed location:
+
+```powershell
+python demo.py tests\samples\vulnerable_tool_poisoning.py --html scan-report.html
+```
+
+With JSON output, the HTML link is printed to stderr so stdout remains valid
+JSON. HTML reports show findings, evidence, recommendations, scan errors and
+the number of recognized tools.
+
+The target is statically analyzed; the server program is not started or modified.
+Exit codes are `0` for no findings, `1` for findings, and `2` for errors. This is
+the same analyzer used by `python -m mcp_scanner scan <path> --verbose`, with
+an additional HTML report. The demo returns `2` for any incomplete scan.
+
+Save machine-readable results with:
+
+```powershell
+python demo.py "C:\projects\my-mcp-server" --format json --output results.json
+```
+
+### Sample Walkthrough
+
+Run the built-in catalog, sample scans, dry-run remediation, and tests explicitly:
 
 ```bash
-python demo.py
+python demo.py --walkthrough
 ```
 
 The demo understands that exit code `1` is expected when a scan successfully

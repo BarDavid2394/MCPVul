@@ -71,11 +71,16 @@ def validate(data: dict, *, frozen: bool = False) -> list[str]:
             errors.append(f"frozen artifact {aid!r} requires sha256:<64 hex>")
 
     label_keys = set()
+    scoped_polarities = {}
     for label in labels:
         key = (label.get("artifact_id"), label.get("rule_id"), label.get("polarity"))
         if key in label_keys:
             errors.append(f"duplicate label: {key!r}")
         label_keys.add(key)
+        scope = (label.get("artifact_id"), label.get("rule_id"))
+        prior = scoped_polarities.setdefault(scope, label.get("polarity"))
+        if prior != label.get("polarity"):
+            errors.append(f"conflicting polarities for {scope!r}")
         if label.get("artifact_id") not in artifact_ids:
             errors.append(f"label references unknown artifact: {key!r}")
         if not RULE_RE.fullmatch(str(label.get("rule_id", ""))):
@@ -97,4 +102,3 @@ def verify_frozen() -> tuple[dict, str]:
     if actual != expected:
         raise ValueError("Frozen manifest fingerprint mismatch")
     return data, actual
-

@@ -16,9 +16,30 @@ python evaluation/scripts/run_evaluation.py
 
 See `REPORT.md` for findings, limitations, and interpretation guidance.
 
-## Clean holdout
+The completed October campaign is documented in
+[the final validation report](../deliverables/Final_Validation_Report.md).
+It includes three additional development rounds, the frozen one-shot evaluation,
+and a [presentation demo](../deliverables/Demo.html). The final reserve has been
+consumed; its results must not be reused as untouched validation.
 
-The clean holdout has a separate, one-way workflow under `holdout/`. Its source
+The [17 October follow-up](../deliverables/Followup_Validation_Report.md)
+completed rounds 008–010 and consumed the separate ten-file MCP-DecayBench
+reserve. Development recall improved, but both reserved positives were missed
+because hand-written JSON-RPC registrations were not extracted. See
+[follow-up records](followup/README.md) for the preserved baseline, comparisons,
+and separate one-shot validation state. The October 16 report remains a
+historical result for its original frozen scanner.
+
+## Development iterations
+
+See [recorded iterations](iterations/README.md) for versioned baseline/fix/retest
+experiments, explicit case labels, error investigations, and reproducible code
+snapshots. These development runs are separate from the final holdout.
+
+## Holdout protocol
+
+The original holdout has a separate, one-way workflow under `holdout/`. It has
+already been consumed; its saved results are historical evidence. Its source
 directory, results, and one-time authorization token are ignored. Normal
 evaluation commands never read or scan it. See `holdout/README.md` before adding
 labels or consuming the holdout.

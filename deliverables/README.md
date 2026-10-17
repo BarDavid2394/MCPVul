@@ -41,6 +41,10 @@ The book reports the observed state, including the validation defects. It does n
 
 - [Final results (PDF)](Final_Project_Results.pdf), [HTML](Final_Project_Results.html),
   and [Markdown](Final_Project_Results.md).
+- [Short slide-ready results (PDF)](Final_Results_Slide_Content.pdf),
+  [HTML](Final_Results_Slide_Content.html), and [Markdown](Final_Results_Slide_Content.md).
+- [Computed full-project metrics](final_project_metrics.json),
+  [per-round CSV](final_project_rounds.csv), and [calculation script](summarize_final_results.py).
 - [Presentation revision guide (PDF)](Final_Presentation_Revision_Plan.pdf),
   [HTML](Final_Presentation_Revision_Plan.html), and [Markdown](Final_Presentation_Revision_Plan.md).
 - [Follow-up validation](Followup_Validation_Report.md),

@@ -19,6 +19,8 @@ do not scan those corpora.
 
 - [Results report (PDF)](deliverables/Final_Project_Results.pdf) or
   [readable Markdown](deliverables/Final_Project_Results.md).
+- [Short results slides (PDF)](deliverables/Final_Results_Slide_Content.pdf) or
+  [copy-ready slide content](deliverables/Final_Results_Slide_Content.md).
 - [Final presentation revision guide (PDF)](deliverables/Final_Presentation_Revision_Plan.pdf)
   or [Markdown](deliverables/Final_Presentation_Revision_Plan.md).
 - [Follow-up validation](deliverables/Followup_Validation_Report.md) and
